@@ -58,3 +58,48 @@ Guidelines:
     return {
         "answer": response.choices[0].message.content
     }
+from sendgrid import SendGridAPIClient
+from sendgrid.helpers.mail import Mail
+
+class EmailRequest(BaseModel):
+    source: str
+    name: str
+    phone: str
+    email: str
+    city: str
+    project_type: str
+    size: str
+    message: str
+
+
+@app.post("/send-email")
+def send_email(data: EmailRequest):
+
+    subject = f"New Lead - {data.name}"
+
+    html_content = f"""
+    <h2>New Customer Lead</h2>
+    <p><b>Source:</b> {data.source}</p>
+    <p><b>Name:</b> {data.name}</p>
+    <p><b>Phone:</b> {data.phone}</p>
+    <p><b>Email:</b> {data.email}</p>
+    <p><b>City:</b> {data.city}</p>
+    <p><b>Project Type:</b> {data.project_type}</p>
+    <p><b>Size:</b> {data.size}</p>
+    <p><b>Message:</b> {data.message}</p>
+    """
+
+    message = Mail(
+        from_email=os.getenv("SENDGRID_FROM_EMAIL"),
+        to_emails=os.getenv("LEAD_RECEIVER_EMAIL"),
+        subject=subject,
+        html_content=html_content,
+    )
+
+    sg = SendGridAPIClient(os.getenv("SENDGRID_API_KEY"))
+    response = sg.send(message)
+
+    return {
+        "status": "success",
+        "code": response.status_code
+    }
