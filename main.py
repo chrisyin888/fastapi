@@ -2,7 +2,10 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 import os
+import requests
 from openai import OpenAI
+from sendgrid import SendGridAPIClient
+from sendgrid.helpers.mail import Mail
 
 app = FastAPI()
 
@@ -18,16 +21,42 @@ app.add_middleware(
 # OpenAI client
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
+# Google Sheet Webhook
+SHEET_WEBHOOK = "https://script.google.com/macros/s/AKfycbwBw3iypXhsPWmgGMa2wwilgRDCYqJA3m5nq7RgbruW9s8ms6D6ZoL7R_isOKHUCrTH/exec"
+
+
+# =========================
 # 数据模型
+# =========================
+
 class Question(BaseModel):
     question: str
 
+
+class EmailRequest(BaseModel):
+    source: str
+    name: str
+    phone: str
+    email: str
+    city: str
+    project_type: str
+    size: str
+    message: str
+
+
+# =========================
 # 测试接口
+# =========================
+
 @app.get("/")
 def root():
     return {"status": "AskPatio AI running"}
 
+
+# =========================
 # AI问答接口
+# =========================
+
 @app.post("/ask")
 async def ask_ai(data: Question):
 
@@ -55,22 +84,32 @@ Guidelines:
         ]
     )
 
+    answer = response.choices[0].message.content
+
+    # 写入 Google Sheet（记录聊天）
+    try:
+        requests.post(SHEET_WEBHOOK, json={
+            "visitor_id": "chat_user",
+            "role": "chat",
+            "message": data.question
+        })
+
+        requests.post(SHEET_WEBHOOK, json={
+            "visitor_id": "ai",
+            "role": "assistant",
+            "message": answer
+        })
+    except:
+        pass
+
     return {
-        "answer": response.choices[0].message.content
+        "answer": answer
     }
-from sendgrid import SendGridAPIClient
-from sendgrid.helpers.mail import Mail
 
-class EmailRequest(BaseModel):
-    source: str
-    name: str
-    phone: str
-    email: str
-    city: str
-    project_type: str
-    size: str
-    message: str
 
+# =========================
+# 发送客户线索邮件
+# =========================
 
 @app.post("/send-email")
 def send_email(data: EmailRequest):
@@ -98,6 +137,16 @@ def send_email(data: EmailRequest):
 
     sg = SendGridAPIClient(os.getenv("SENDGRID_API_KEY"))
     response = sg.send(message)
+
+    # 写入 Google Sheet（记录客户）
+    try:
+        requests.post(SHEET_WEBHOOK, json={
+            "visitor_id": data.email,
+            "role": "lead",
+            "message": data.message
+        })
+    except:
+        pass
 
     return {
         "status": "success",
