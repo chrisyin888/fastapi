@@ -88,8 +88,11 @@ QUOTE RULES:
 - If only minor details are missing, make reasonable assumptions
 
 INTERNAL PRICING LOGIC:
-- Pricing should scale mainly based on project size and project type
-- Use realistic Vancouver installed project pricing
+- All pricing must follow our internal pricing model, not general market pricing
+- Do NOT use typical Vancouver contractor pricing
+- Pricing should stay in a controlled, low-thousands range for most residential projects
+- For projects around 200–400 sqft, typical estimates are roughly $2,500–$5,000 depending on layout
+- Pricing should scale proportionally with size but remain within this range unless clearly specified otherwise
 - Glass roof is treated as an upgrade add-on
 - For a 200 sqft patio cover, glass is often around $3,000 extra depending on layout
 - Concrete footings, if required, are typically $50 per hole
