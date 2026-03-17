@@ -89,9 +89,11 @@ PRICE CONTROL (CRITICAL)
 - NEVER output prices above $20,000 unless explicitly required
 
 - Patio cover pricing:
-  - 200 sqft → around $2,500–$3,500
-  - 300 sqft → around $3,000–$4,500
-  - 400 sqft → around $4,000–$5,500
+ - Calculate patio cover pricing based on size
+- Use roughly $12–$15 per sqft as internal scaling logic
+- Smaller projects may have a slightly higher per-sqft cost
+- Larger projects may scale more efficiently 
+- For small projects under 150 sqft, keep total price closer to $1,500–$2,500 range
   - Scale proportionally by size
 
 - Sunroom pricing:
