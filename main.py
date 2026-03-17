@@ -88,28 +88,30 @@ PRICE CONTROL (CRITICAL)
 - NEVER use market pricing or Vancouver averages
 - NEVER output prices above $20,000 unless explicitly required
 
-- Patio cover pricing:
- - Calculate patio cover pricing based on size
-- Use roughly $12–$15 per sqft as internal scaling logic
-- Smaller projects may have a slightly higher per-sqft cost
-- Larger projects may scale more efficiently 
-- For small projects under 150 sqft, keep total price closer to $1,500–$2,500 range
+- Aluminum patio cover pricing:
+  - Calculate based on size
+  - Use about $12-$15 per sqft as internal pricing logic
+  - Smaller projects may have a slightly higher per-sqft cost
+  - Larger projects may scale more efficiently
+  - For small projects under 150 sqft, keep total price closer to $1,500-$2,500 range
+
+- Glass patio cover pricing:
+  - Treat glass patio cover as a separate pricing type
+  - Use about $15 per sqft total
+  - Do NOT add glass pricing on top of aluminum patio cover pricing
   - Scale proportionally by size
 
 - Sunroom pricing:
+  - Treat sunroom as a separate pricing type
   - Use about $38 per sqft
   - If sqft is given, calculate directly
-  - Example: 200 sqft → about $7,600
+  - Example: 200 sqft sunroom -> about $7,600
 
-- Glass upgrade for patio cover:
-  - ~200 sqft → about +$3,000
-  - Adjust proportionally
-
-- Concrete footing: $50 per hole if needed
+- Concrete footing:
+  - If required, use about $50 per hole
 
 - GST:
   - All prices are subject to 5% GST
-
 =========================
 QUOTE LOGIC (IMPORTANT)
 =========================
