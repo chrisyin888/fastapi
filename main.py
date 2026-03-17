@@ -203,6 +203,9 @@ User: "patio cover"
 @app.post("/send-email")
 def send_email(data: EmailRequest):
 
+    sg = SendGridAPIClient(os.getenv("SENDGRID_API_KEY"))
+
+    # 1) 发给你自己的 lead 邮件
     subject = f"New Lead - {data.name}"
 
     html_content = f"""
@@ -213,21 +216,45 @@ def send_email(data: EmailRequest):
     <p><b>Email:</b> {data.email}</p>
     <p><b>City:</b> {data.city}</p>
     <p><b>Project Type:</b> {data.project_type}</p>
-    <p><b>Size:</b> {data.size}</p>
-    <p><b>Message:</b> {data.message}</p>
+    <p><b>Size:</b> {data.size if data.size else 'Not provided'}</p>
+    <p><b>Message:</b> {data.message if data.message else 'No message'}</p>
     """
 
-    message = Mail(
+    admin_message = Mail(
         from_email=os.getenv("SENDGRID_FROM_EMAIL"),
         to_emails=os.getenv("LEAD_RECEIVER_EMAIL"),
         subject=subject,
         html_content=html_content,
     )
 
-    sg = SendGridAPIClient(os.getenv("SENDGRID_API_KEY"))
-    response = sg.send(message)
+    admin_response = sg.send(admin_message)
 
-    # 写入 Google Sheet（记录客户）
+    # 2) 自动发给客户确认邮件
+    customer_subject = "We received your appointment request"
+
+    customer_html = f"""
+    <h2>Thank you, {data.name}!</h2>
+    <p>We’ve received your request for a free on-site measurement.</p>
+    <p>Project type: <b>{data.project_type}</b></p>
+    <p>City: <b>{data.city}</b></p>
+    <p>Size: <b>{data.size if data.size else 'Not provided'}</b></p>
+    <p>Our team will contact you shortly to arrange the appointment.</p>
+    <p>Final pricing will be confirmed after the site visit.</p>
+    <br>
+    <p>Thank you,</p>
+    <p>AskPatio AI Team</p>
+    """
+
+    customer_message = Mail(
+        from_email=os.getenv("SENDGRID_FROM_EMAIL"),
+        to_emails=data.email,
+        subject=customer_subject,
+        html_content=customer_html,
+    )
+
+    customer_response = sg.send(customer_message)
+
+    # 3) 写入 Google Sheet（记录客户）
     try:
         requests.post(SHEET_WEBHOOK, json={
             "visitor_id": data.email,
@@ -239,5 +266,6 @@ def send_email(data: EmailRequest):
 
     return {
         "status": "success",
-        "code": response.status_code
+        "admin_code": admin_response.status_code,
+        "customer_code": customer_response.status_code
     }
