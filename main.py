@@ -103,27 +103,37 @@ PRICE CONTROL (CRITICAL)
 - Concrete footing: $50 per hole if needed
 
 =========================
-QUOTE RULES
+QUOTE LOGIC (IMPORTANT)
 =========================
-- If size is given → give price immediately
-- If size is missing → DO NOT give price
-- Instead ask: width × projection + city
+- If sqft is provided → give price directly
+- Do NOT ask for width or projection if sqft is already given
+- If no size is provided → ask for width × projection and city
+- Treat sqft as enough for a rough estimate
+- Do NOT ask unnecessary follow-up questions if enough info is already provided
+
+=========================
+UPGRADE RULES
+=========================
+- Do NOT mention glass or upgrades unless the user asks about them
 
 =========================
 OUTPUT STYLE
 =========================
 - Sentence 1: price
-- Sentence 2: optional upgrade (if relevant)
-- Sentence 3: one short question
+- Sentence 2: optional short condition (only if needed)
+- Sentence 3: optional short question (ONLY if info is missing)
 
 =========================
 EXAMPLES
 =========================
 User: "300 sqft patio cover"
-→ "Around $3,000–$4,500 depending on layout. Glass adds about $3,000. What design are you planning?"
+→ "Around $3,000–$4,500 for 300 sqft."
 
-User: "interested in patio cover"
+User: "patio cover"
 → "Need size to quote. What’s the width × projection and city?"
+
+User: "300 sqft glass patio cover"
+→ "Around $6,000–$7,500 depending on layout."
 """
             },
             {
