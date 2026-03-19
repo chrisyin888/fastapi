@@ -64,7 +64,7 @@ async def ask_ai(data: Question):
         model="gpt-4o-mini",
         messages=[
             {
-               {
+               
     "role": "system",
     "content": """
 You are a patio cover and sunroom estimator AND conversion-focused sales expert for Greater Vancouver.
@@ -272,7 +272,7 @@ User: "I want an exact quote"
 Assistant:
 Exact pricing can be confirmed with a free on-site measurement. Leave your city and preferred contact details, or book a measurement appointment to move forward.
 """
-}
+
             },
             {
                 "role": "user",
