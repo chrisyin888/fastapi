@@ -6,6 +6,8 @@ import requests
 from openai import OpenAI
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail
+from typing import Optional
+from datetime import datetime
 
 app = FastAPI()
 
@@ -22,7 +24,14 @@ app.add_middleware(
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # Google Sheet Webhook
-SHEET_WEBHOOK = "https://script.google.com/macros/s/AKfycbwBw3iypXhsPWmgGMa2wwilgRDCYqJA3m5nq7RgbruW9s8ms6D6ZoL7R_isOKHUCrTH/exec"
+SHEET_WEBHOOK = os.getenv(
+    "SHEET_WEBHOOK",
+    "https://script.google.com/macros/s/AKfycbwBw3iypXhsPWmgGMa2wwilgRDCYqJA3m5nq7RgbruW9s8ms6D6ZoL7R_isOKHUCrTH/exec"
+)
+
+SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
+SENDGRID_FROM_EMAIL = os.getenv("SENDGRID_FROM_EMAIL")
+LEAD_RECEIVER_EMAIL = os.getenv("LEAD_RECEIVER_EMAIL")
 
 
 # =========================
@@ -33,6 +42,21 @@ class Question(BaseModel):
     question: str
 
 
+class LeadRequest(BaseModel):
+    source: str = "website_chat"
+    name: str
+    phone: str
+    email: Optional[str] = ""
+    city: Optional[str] = ""
+    address: Optional[str] = ""
+    project_type: Optional[str] = ""
+    size: Optional[str] = ""
+    preferred_contact_time: Optional[str] = ""
+    message: Optional[str] = ""
+    notes: Optional[str] = ""
+
+
+# 兼容你旧前端 /send-email 的字段
 class EmailRequest(BaseModel):
     source: str
     name: str
@@ -42,6 +66,134 @@ class EmailRequest(BaseModel):
     project_type: str
     size: str
     message: str
+
+
+# =========================
+# 工具函数
+# =========================
+
+def now_str():
+    return datetime.now().strftime("%Y-%m-%d %I:%M %p")
+
+
+def safe_post_to_sheet(payload: dict):
+    if not SHEET_WEBHOOK:
+        return {"success": False, "error": "Missing SHEET_WEBHOOK"}
+
+    try:
+        r = requests.post(SHEET_WEBHOOK, json=payload, timeout=15)
+        return {
+            "success": r.ok,
+            "status_code": r.status_code,
+            "text": r.text[:300]
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def send_admin_lead_email(payload: dict):
+    if not SENDGRID_API_KEY or not SENDGRID_FROM_EMAIL or not LEAD_RECEIVER_EMAIL:
+        return {"success": False, "error": "Missing SendGrid env vars"}
+
+    try:
+        sg = SendGridAPIClient(SENDGRID_API_KEY)
+
+        subject = f"New Lead - {payload.get('name', 'Unknown')} - {payload.get('city', '')}"
+
+        html_content = f"""
+        <h2>New Customer Lead</h2>
+        <p><b>Submitted At:</b> {payload.get('submitted_at', '')}</p>
+        <p><b>Source:</b> {payload.get('source', '')}</p>
+        <p><b>Name:</b> {payload.get('name', '')}</p>
+        <p><b>Phone:</b> {payload.get('phone', '')}</p>
+        <p><b>Email:</b> {payload.get('email', '') or 'Not provided'}</p>
+        <p><b>City:</b> {payload.get('city', '') or 'Not provided'}</p>
+        <p><b>Address:</b> {payload.get('address', '') or 'Not provided'}</p>
+        <p><b>Project Type:</b> {payload.get('project_type', '') or 'Not provided'}</p>
+        <p><b>Size:</b> {payload.get('size', '') or 'Not provided'}</p>
+        <p><b>Preferred Contact Time:</b> {payload.get('preferred_contact_time', '') or 'Not provided'}</p>
+        <p><b>Message:</b> {payload.get('message', '') or 'No message'}</p>
+        <p><b>Notes:</b> {payload.get('notes', '') or 'No notes'}</p>
+        """
+
+        admin_message = Mail(
+            from_email=SENDGRID_FROM_EMAIL,
+            to_emails=LEAD_RECEIVER_EMAIL,
+            subject=subject,
+            html_content=html_content,
+        )
+
+        admin_response = sg.send(admin_message)
+
+        return {
+            "success": True,
+            "status_code": admin_response.status_code
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def send_customer_confirmation_email(payload: dict):
+    email = (payload.get("email") or "").strip()
+
+    # 客户没留邮箱就跳过，不报错
+    if not email:
+        return {"success": True, "skipped": True, "reason": "No customer email"}
+
+    if not SENDGRID_API_KEY or not SENDGRID_FROM_EMAIL:
+        return {"success": False, "error": "Missing SendGrid env vars"}
+
+    try:
+        sg = SendGridAPIClient(SENDGRID_API_KEY)
+
+        customer_subject = "We received your appointment request"
+
+        customer_html = f"""
+        <h2>Thank you, {payload.get('name', '')}!</h2>
+        <p>Your request for a free on-site measurement has been received.</p>
+        <p><b>Project type:</b> {payload.get('project_type', '') or 'Patio Cover / Sunroom'}</p>
+        <p><b>City:</b> {payload.get('city', '') or 'Not provided'}</p>
+        <p><b>Address:</b> {payload.get('address', '') or 'Not provided'}</p>
+        <p><b>Size:</b> {payload.get('size', '') or 'Not provided'}</p>
+        <p>Someone will contact you shortly to arrange the appointment.</p>
+        <p>Final pricing will be confirmed after the site visit.</p>
+        <br>
+        <p>Thank you,</p>
+        <p>AskPatio AI Team</p>
+        """
+
+        customer_message = Mail(
+            from_email=SENDGRID_FROM_EMAIL,
+            to_emails=email,
+            subject=customer_subject,
+            html_content=customer_html,
+        )
+
+        customer_response = sg.send(customer_message)
+
+        return {
+            "success": True,
+            "status_code": customer_response.status_code
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def normalize_lead_payload(data):
+    return {
+        "submitted_at": now_str(),
+        "source": (getattr(data, "source", "") or "website_chat").strip(),
+        "name": (getattr(data, "name", "") or "").strip(),
+        "phone": (getattr(data, "phone", "") or "").strip(),
+        "email": (getattr(data, "email", "") or "").strip(),
+        "city": (getattr(data, "city", "") or "").strip(),
+        "address": (getattr(data, "address", "") or "").strip(),
+        "project_type": (getattr(data, "project_type", "") or "").strip(),
+        "size": (getattr(data, "size", "") or "").strip(),
+        "preferred_contact_time": (getattr(data, "preferred_contact_time", "") or "").strip(),
+        "message": (getattr(data, "message", "") or "").strip(),
+        "notes": (getattr(data, "notes", "") or "").strip(),
+    }
 
 
 # =========================
@@ -59,14 +211,12 @@ def root():
 
 @app.post("/ask")
 async def ask_ai(data: Question):
-
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
             {
-               
-    "role": "system",
-    "content": """
+                "role": "system",
+                "content": """
 You are a patio cover and sunroom estimator AND conversion-focused sales expert for Greater Vancouver.
 
 Your goal is to move the customer toward the next action:
@@ -81,7 +231,6 @@ CORE STYLE
 - Natural, confident, direct
 - Helpful, slightly persuasive
 - No fluff
-- No first-person words (NO: "I", "we")
 - Keep replies short: usually 2–4 sentences
 - Always move the conversation forward
 
@@ -244,6 +393,7 @@ Case 3: User does not know size
 
 Case 4: Strong intent / ready customer
 - Move naturally toward booking or contact collection
+
 =========================
 AGREEMENT / BOOKING TRIGGER
 =========================
@@ -270,11 +420,12 @@ Example response:
 "Perfect 👍 Let’s get your free measurement booked.
 
 Please share:
-• Name  
-• Phone number  
-• Address  
+• Name
+• Phone number
+• Address
 
 Scheduling can be arranged and exact pricing will be confirmed after the visit."
+
 =========================
 EXAMPLES
 =========================
@@ -302,31 +453,35 @@ User: "I want an exact quote"
 Assistant:
 Exact pricing can be confirmed with a free on-site measurement. Leave your city and preferred contact details, or book a measurement appointment to move forward.
 """
-
             },
             {
                 "role": "user",
                 "content": data.question
             }
-        ]
+        ],
+        temperature=0.5
     )
 
     answer = response.choices[0].message.content
 
     # 写入 Google Sheet（记录聊天）
     try:
-        requests.post(SHEET_WEBHOOK, json={
+        safe_post_to_sheet({
+            "type": "chat",
             "visitor_id": "chat_user",
             "role": "chat",
-            "message": data.question
+            "message": data.question,
+            "submitted_at": now_str()
         })
 
-        requests.post(SHEET_WEBHOOK, json={
+        safe_post_to_sheet({
+            "type": "chat",
             "visitor_id": "ai",
             "role": "assistant",
-            "message": answer
+            "message": answer,
+            "submitted_at": now_str()
         })
-    except:
+    except Exception:
         pass
 
     return {
@@ -335,75 +490,102 @@ Exact pricing can be confirmed with a free on-site measurement. Leave your city 
 
 
 # =========================
-# 发送客户线索邮件
+# 统一 lead 接口
+# 聊天窗口 和 booking form 都可以调用这个
+# =========================
+
+@app.post("/lead")
+def submit_lead(data: LeadRequest):
+    payload = normalize_lead_payload(data)
+
+    if not payload["name"] or not payload["phone"]:
+        return {
+            "success": False,
+            "message": "Name and phone are required."
+        }
+
+    # 1) 写入 Google Sheet
+    sheet_result = safe_post_to_sheet({
+        "type": "lead",
+        "submitted_at": payload["submitted_at"],
+        "source": payload["source"],
+        "name": payload["name"],
+        "phone": payload["phone"],
+        "email": payload["email"],
+        "city": payload["city"],
+        "address": payload["address"],
+        "project_type": payload["project_type"],
+        "size": payload["size"],
+        "preferred_contact_time": payload["preferred_contact_time"],
+        "message": payload["message"],
+        "notes": payload["notes"]
+    })
+
+    # 2) 发给你自己的提醒邮件
+    admin_email_result = send_admin_lead_email(payload)
+
+    # 3) 如果客户留了邮箱，自动发确认邮件
+    customer_email_result = send_customer_confirmation_email(payload)
+
+    return {
+        "success": True,
+        "message": "Lead received successfully.",
+        "sheet_result": sheet_result,
+        "admin_email_result": admin_email_result,
+        "customer_email_result": customer_email_result
+    }
+
+
+# =========================
+# 兼容旧接口 /send-email
+# 你的旧前端不改也能继续用
 # =========================
 
 @app.post("/send-email")
 def send_email(data: EmailRequest):
+    payload = {
+        "submitted_at": now_str(),
+        "source": (data.source or "").strip(),
+        "name": (data.name or "").strip(),
+        "phone": (data.phone or "").strip(),
+        "email": (data.email or "").strip(),
+        "city": (data.city or "").strip(),
+        "address": "",
+        "project_type": (data.project_type or "").strip(),
+        "size": (data.size or "").strip(),
+        "preferred_contact_time": "",
+        "message": (data.message or "").strip(),
+        "notes": ""
+    }
 
-    sg = SendGridAPIClient(os.getenv("SENDGRID_API_KEY"))
+    if not payload["name"] or not payload["phone"]:
+        return {
+            "success": False,
+            "message": "Name and phone are required."
+        }
 
-    # 1) 发给你自己的 lead 邮件
-    subject = f"New Lead - {data.name}"
+    sheet_result = safe_post_to_sheet({
+        "type": "lead",
+        "submitted_at": payload["submitted_at"],
+        "source": payload["source"],
+        "name": payload["name"],
+        "phone": payload["phone"],
+        "email": payload["email"],
+        "city": payload["city"],
+        "address": payload["address"],
+        "project_type": payload["project_type"],
+        "size": payload["size"],
+        "preferred_contact_time": payload["preferred_contact_time"],
+        "message": payload["message"],
+        "notes": payload["notes"]
+    })
 
-    html_content = f"""
-    <h2>New Customer Lead</h2>
-    <p><b>Source:</b> {data.source}</p>
-    <p><b>Name:</b> {data.name}</p>
-    <p><b>Phone:</b> {data.phone}</p>
-    <p><b>Email:</b> {data.email}</p>
-    <p><b>City:</b> {data.city}</p>
-    <p><b>Project Type:</b> {data.project_type}</p>
-    <p><b>Size:</b> {data.size if data.size else 'Not provided'}</p>
-    <p><b>Message:</b> {data.message if data.message else 'No message'}</p>
-    """
-
-    admin_message = Mail(
-        from_email=os.getenv("SENDGRID_FROM_EMAIL"),
-        to_emails=os.getenv("LEAD_RECEIVER_EMAIL"),
-        subject=subject,
-        html_content=html_content,
-    )
-
-    admin_response = sg.send(admin_message)
-
-    # 2) 自动发给客户确认邮件
-    customer_subject = "We received your appointment request"
-
-    customer_html = f"""
-    <h2>Thank you, {data.name}!</h2>
-    <p>We’ve received your request for a free on-site measurement.</p>
-    <p>Project type: <b>{data.project_type}</b></p>
-    <p>City: <b>{data.city}</b></p>
-    <p>Size: <b>{data.size if data.size else 'Not provided'}</b></p>
-    <p>Our team will contact you shortly to arrange the appointment.</p>
-    <p>Final pricing will be confirmed after the site visit.</p>
-    <br>
-    <p>Thank you,</p>
-    <p>AskPatio AI Team</p>
-    """
-
-    customer_message = Mail(
-        from_email=os.getenv("SENDGRID_FROM_EMAIL"),
-        to_emails=data.email,
-        subject=customer_subject,
-        html_content=customer_html,
-    )
-
-    customer_response = sg.send(customer_message)
-
-    # 3) 写入 Google Sheet（记录客户）
-    try:
-        requests.post(SHEET_WEBHOOK, json={
-            "visitor_id": data.email,
-            "role": "lead",
-            "message": data.message
-        })
-    except:
-        pass
+    admin_email_result = send_admin_lead_email(payload)
+    customer_email_result = send_customer_confirmation_email(payload)
 
     return {
-        "status": "success",
-        "admin_code": admin_response.status_code,
-        "customer_code": customer_response.status_code
+        "success": True,
+        "sheet_result": sheet_result,
+        "admin_email_result": admin_email_result,
+        "customer_email_result": customer_email_result
     }
