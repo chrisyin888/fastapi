@@ -149,18 +149,28 @@ def send_customer_confirmation_email(payload: dict):
         customer_subject = "We received your appointment request"
 
         customer_html = f"""
-        <h2>Thank you, {payload.get('name', '')}!</h2>
-        <p>Your request for a free on-site measurement has been received.</p>
-        <p><b>Project type:</b> {payload.get('project_type', '') or 'Patio Cover / Sunroom'}</p>
-        <p><b>City:</b> {payload.get('city', '') or 'Not provided'}</p>
-        <p><b>Address:</b> {payload.get('address', '') or 'Not provided'}</p>
-        <p><b>Size:</b> {payload.get('size', '') or 'Not provided'}</p>
-        <p>Someone will contact you shortly to arrange the appointment.</p>
-        <p>Final pricing will be confirmed after the site visit.</p>
-        <br>
-        <p>Thank you,</p>
-        <p>AskPatio AI Team</p>
-        """
+<p>Hi {payload.get('name', '') or 'there'},</p>
+
+<p>Thanks for reaching out to <strong>LoomiHome Patios</strong>!</p>
+
+<p>We’ve received your request for <strong>{payload.get('project_type', '') or 'a patio cover / sunroom'}</strong>.</p>
+
+<p>
+<b>City:</b> {payload.get('city', '') or 'Not provided'}<br>
+<b>Address:</b> {payload.get('address', '') or 'Not provided'}<br>
+<b>Size:</b> {payload.get('size', '') or 'Not provided yet'}
+</p>
+
+<p>Our team will contact you shortly to arrange a quick measurement.</p>
+
+<p>Most projects typically range between <strong>$8–$15 per sq ft</strong> depending on materials and design.</p>
+
+<p>If you already have an approximate size or photos of the area, feel free to reply to this email for a faster estimate.</p>
+
+<br>
+<p>Best regards,</p>
+<p><strong>LoomiHome Patios</strong></p>
+"""
 
         customer_message = Mail(
             from_email=SENDGRID_FROM_EMAIL,
