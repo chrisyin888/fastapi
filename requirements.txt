@@ -4,3 +4,4 @@ openai
 sendgrid
 requests
 pydantic
+python-multipart

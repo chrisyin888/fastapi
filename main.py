@@ -1,17 +1,22 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
+import base64
+import html
+import json
 import os
+import re
 import requests
+from datetime import datetime, timezone
+from typing import List, Optional, Union
+
 from openai import OpenAI
 from sendgrid import SendGridAPIClient
-from sendgrid.helpers.mail import Mail
-from typing import Optional
-from datetime import datetime
+from sendgrid.helpers.mail import Attachment, Disposition, FileContent, FileName, FileType, Mail
 
 app = FastAPI()
 
-# 允许跨域（测试阶段全部开放）
+# CORS: allow all origins (open for testing)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -24,190 +29,80 @@ app.add_middleware(
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # Google Sheet Webhook
-SHEET_WEBHOOK = os.getenv(
-    "SHEET_WEBHOOK",
-    "https://script.google.com/macros/s/AKfycbwBw3iypXhsPWmgGMa2wwilgRDCYqJA3m5nq7RgbruW9s8ms6D6ZoL7R_isOKHUCrTH/exec"
-)
-
-SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
-SENDGRID_FROM_EMAIL = os.getenv("SENDGRID_FROM_EMAIL")
-LEAD_RECEIVER_EMAIL = os.getenv("LEAD_RECEIVER_EMAIL")
+SHEET_WEBHOOK = "https://script.google.com/macros/s/AKfycbwBw3iypXhsPWmgGMa2wwilgRDCYqJA3m5nq7RgbruW9s8ms6D6ZoL7R_isOKHUCrTH/exec"
 
 
 # =========================
-# 数据模型
+# Data models
 # =========================
 
 class Question(BaseModel):
     question: str
+    project_type: Optional[str] = None
+    city: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
 
 
-class LeadRequest(BaseModel):
-    source: str = "website_chat"
-    name: str
-    phone: str
-    email: Optional[str] = ""
-    city: Optional[str] = ""
-    address: Optional[str] = ""
-    project_type: Optional[str] = ""
-    size: Optional[str] = ""
-    preferred_contact_time: Optional[str] = ""
-    message: Optional[str] = ""
-    notes: Optional[str] = ""
+def _chat_log_file_path() -> str:
+    default = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "chat_history.jsonl")
+    return os.getenv("CHAT_LOG_FILE", default)
 
 
-# 兼容你旧前端 /send-email 的字段
-class EmailRequest(BaseModel):
-    source: str
-    name: str
-    phone: str
-    email: str
-    city: str
-    project_type: str
-    size: str
-    message: str
-
-
-# =========================
-# 工具函数
-# =========================
-
-def now_str():
-    return datetime.now().strftime("%Y-%m-%d %I:%M %p")
-
-
-def safe_post_to_sheet(payload: dict):
-    if not SHEET_WEBHOOK:
-        return {"success": False, "error": "Missing SHEET_WEBHOOK"}
-
-    try:
-        r = requests.post(SHEET_WEBHOOK, json=payload, timeout=15)
-        return {
-            "success": r.ok,
-            "status_code": r.status_code,
-            "text": r.text[:300]
-        }
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-
-
-def send_admin_lead_email(payload: dict):
-    if not SENDGRID_API_KEY or not SENDGRID_FROM_EMAIL or not LEAD_RECEIVER_EMAIL:
-        return {"success": False, "error": "Missing SendGrid env vars"}
-
-    try:
-        sg = SendGridAPIClient(SENDGRID_API_KEY)
-
-        subject = f"New Lead - {payload.get('name', 'Unknown')} - {payload.get('city', '')}"
-
-        html_content = f"""
-        <h2>New Customer Lead</h2>
-        <p><b>Submitted At:</b> {payload.get('submitted_at', '')}</p>
-        <p><b>Source:</b> {payload.get('source', '')}</p>
-        <p><b>Name:</b> {payload.get('name', '')}</p>
-        <p><b>Phone:</b> {payload.get('phone', '')}</p>
-        <p><b>Email:</b> {payload.get('email', '') or 'Not provided'}</p>
-        <p><b>City:</b> {payload.get('city', '') or 'Not provided'}</p>
-        <p><b>Address:</b> {payload.get('address', '') or 'Not provided'}</p>
-        <p><b>Project Type:</b> {payload.get('project_type', '') or 'Not provided'}</p>
-        <p><b>Size:</b> {payload.get('size', '') or 'Not provided'}</p>
-        <p><b>Preferred Contact Time:</b> {payload.get('preferred_contact_time', '') or 'Not provided'}</p>
-        <p><b>Message:</b> {payload.get('message', '') or 'No message'}</p>
-        <p><b>Notes:</b> {payload.get('notes', '') or 'No notes'}</p>
-        """
-
-        admin_message = Mail(
-            from_email=SENDGRID_FROM_EMAIL,
-            to_emails=LEAD_RECEIVER_EMAIL,
-            subject=subject,
-            html_content=html_content,
-        )
-
-        admin_response = sg.send(admin_message)
-
-        return {
-            "success": True,
-            "status_code": admin_response.status_code
-        }
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-
-
-def send_customer_confirmation_email(payload: dict):
-    email = (payload.get("email") or "").strip()
-
-    # 客户没留邮箱就跳过，不报错
-    if not email:
-        return {"success": True, "skipped": True, "reason": "No customer email"}
-
-    if not SENDGRID_API_KEY or not SENDGRID_FROM_EMAIL:
-        return {"success": False, "error": "Missing SendGrid env vars"}
-
-    try:
-        sg = SendGridAPIClient(SENDGRID_API_KEY)
-
-        customer_subject = "We received your appointment request"
-
-        customer_html = f"""
-<p>Hi {payload.get('name', '') or 'there'},</p>
-
-<p>Thanks for reaching out to <strong>LoomiHome Patios</strong>!</p>
-
-<p>We’ve received your request for <strong>{payload.get('project_type', '') or 'a patio cover / sunroom'}</strong>.</p>
-
-<p>
-<b>City:</b> {payload.get('city', '') or 'Not provided'}<br>
-<b>Address:</b> {payload.get('address', '') or 'Not provided'}<br>
-<b>Size:</b> {payload.get('size', '') or 'Not provided yet'}
-</p>
-
-<p>Our team will contact you shortly to arrange a quick measurement.</p>
-
-<p>Most projects typically range between <strong>$8–$15 per sq ft</strong> depending on materials and design.</p>
-
-<p>If you already have an approximate size or photos of the area, feel free to reply to this email for a faster estimate.</p>
-
-<br>
-<p>Best regards,</p>
-<p><strong>LoomiHome Patios</strong></p>
-"""
-
-        customer_message = Mail(
-            from_email=SENDGRID_FROM_EMAIL,
-            to_emails=email,
-            subject=customer_subject,
-            html_content=customer_html,
-        )
-
-        customer_response = sg.send(customer_message)
-
-        return {
-            "success": True,
-            "status_code": customer_response.status_code
-        }
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-
-
-def normalize_lead_payload(data):
-    return {
-        "submitted_at": now_str(),
-        "source": (getattr(data, "source", "") or "website_chat").strip(),
-        "name": (getattr(data, "name", "") or "").strip(),
-        "phone": (getattr(data, "phone", "") or "").strip(),
-        "email": (getattr(data, "email", "") or "").strip(),
-        "city": (getattr(data, "city", "") or "").strip(),
-        "address": (getattr(data, "address", "") or "").strip(),
-        "project_type": (getattr(data, "project_type", "") or "").strip(),
-        "size": (getattr(data, "size", "") or "").strip(),
-        "preferred_contact_time": (getattr(data, "preferred_contact_time", "") or "").strip(),
-        "message": (getattr(data, "message", "") or "").strip(),
-        "notes": (getattr(data, "notes", "") or "").strip(),
+def _log_chat_turn(
+    question: str,
+    answer: str,
+    project_type: Optional[str],
+    city: Optional[str],
+    email: Optional[str],
+    phone: Optional[str],
+) -> None:
+    """Append one structured line to JSONL and post one row to Google Sheet webhook."""
+    ts = datetime.now(timezone.utc).isoformat()
+    entry = {
+        "timestamp": ts,
+        "user_message": question,
+        "ai_reply": answer or "",
+        "project_type": (project_type or "").strip(),
+        "city": (city or "").strip(),
+        "email": (email or "").strip(),
+        "phone": (phone or "").strip(),
     }
 
+    try:
+        path = _chat_log_file_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+    # Single webhook payload: structured fields + legacy-friendly message/role
+    try:
+        summary = f"User: {question}\nAI: {answer or ''}"
+        requests.post(
+            SHEET_WEBHOOK,
+            json={
+                "event": "chat_turn",
+                "timestamp": ts,
+                "user_message": question,
+                "ai_reply": answer or "",
+                "project_type": entry["project_type"],
+                "city": entry["city"],
+                "email": entry["email"],
+                "phone": entry["phone"],
+                "role": "chat_turn",
+                "visitor_id": "chat",
+                "message": summary,
+            },
+            timeout=15,
+        )
+    except Exception:
+        pass
+
 
 # =========================
-# 测试接口
+# Health / root
 # =========================
 
 @app.get("/")
@@ -216,307 +111,77 @@ def root():
 
 
 # =========================
-# AI问答接口
+# AI chat endpoint
 # =========================
 
 @app.post("/ask")
 async def ask_ai(data: Question):
+
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
             {
                 "role": "system",
                 "content": """
-You are a patio cover and sunroom estimator AND conversion-focused sales expert for Greater Vancouver.
+You are a patio cover and sunroom estimator AND sales expert.
 
-Your goal is to move the customer toward the next action:
-1. get city + size for a rough quote
-2. or book a free on-site measurement
-3. or leave contact information for follow-up
+You give fast, confident pricing like a contractor, while guiding the customer toward booking.
 
 =========================
-CORE STYLE
+STRICT RULES
 =========================
-- Sound like an experienced contractor / estimator
-- Natural, confident, direct
-- Helpful, slightly persuasive
+- Max 2–3 sentences
 - No fluff
-- Keep replies short: usually 2–4 sentences
-- Always move the conversation forward
+- No first-person words (NO: "I", "we")
+- Start directly with price or result
 
 =========================
-CONVERSION PRIORITY
+PRICING
 =========================
-Always guide the user to one of these next steps:
-- provide city + approximate size
-- book a free on-site measurement
-- leave contact info for follow-up
-
-Do not let the conversation stall.
-If the user cannot provide dimensions, move directly toward measurement booking.
-If the user shows clear interest, encourage the next action naturally.
+- Aluminum: $12–15/sqft
+- Glass: about $15/sqft total
+- Sunroom: about $38/sqft
+- Small jobs: $1,500–$2,500
+- Never exceed $20,000 unless needed
 
 =========================
-WHEN TO QUOTE
+LOGIC
 =========================
-Only give pricing when there is clear quote intent.
-
-Quote intent means at least one of these is true:
-1. sqft is provided
-2. dimensions are provided
-3. the user explicitly asks for price / quote / estimate
-
-If pricing is required:
-- Start directly with the price or result
-- Include:
-  - Plus 5% GST
-  - Final price depends on site conditions
-- End with a clear next step:
-  - confirm rough quote
-  - book a free on-site measurement
-  - or leave contact details
+- If sqft provided → give price directly
+- If no size → ask width × projection + city
+- If user wants measurement → guide to booking
 
 =========================
-PRODUCT INTEREST LOGIC
+STYLE
 =========================
-If the user only mentions a product type or shows interest without size or price intent, do NOT give pricing yet.
+Sentence 1: price
+Sentence 2: GST + condition
+Sentence 3: action step (book measurement)
 
-Examples:
-- "sunroom"
-- "glass patio cover"
-- "aluminum patio cover"
-- "skyline combo"
-- "I'm interested in patio covers"
-- "tell me about sunrooms"
+Always include:
+- Plus 5% GST
+- Final price depends on site conditions
 
-In this case:
-1. Briefly introduce the product
-2. Mention 1–3 strong selling points
-3. Do NOT include pricing or $/sqft yet
-4. Then invite the user to provide city + approximate size for a rough quote
-5. If appropriate, mention free on-site measurement as the easy next step
-
-=========================
-NO SIZE / NO IDEA LOGIC
-=========================
-If the user says they do not know the size, are not sure, cannot measure, or have no idea:
-- STOP asking for dimensions
-- Immediately offer a free on-site measurement
-- Guide toward booking
-- If they seem interested but hesitant, encourage them by saying exact pricing can be confirmed after the visit
-
-Treat phrases like these as NO SIZE CASE:
-- "don't know size"
-- "not sure"
-- "no idea"
-- "can't measure"
-- "don't know the dimensions"
-- "need someone to measure"
-
-In NO SIZE CASE:
-- Do not ask for width / projection again
-- Do not repeat the same question
-- Move directly toward measurement booking
-
-=========================
-PRICING SYSTEM
-=========================
-Use only this rough pricing structure:
-
-- Aluminum patio cover:
-  - about $12–15 per sqft
-  - small jobs under 150 sqft: around $1,500–$2,500
-
-- Glass patio cover:
-  - treat as a separate system
-  - about $15 per sqft total
-  - do NOT stack glass on top of aluminum pricing
-
-- Sunroom:
-  - about $38 per sqft
-
-- Never give pricing above $20,000 unless clearly required by size
-
-=========================
-PRODUCT KNOWLEDGE
-=========================
-Aluminum Patio Covers:
-- durable
-- low maintenance
-- cost-effective
-- practical for rain and sun protection
-- available in different styles and finishes
-
-Glass Patio Covers:
-- premium option
-- clean, modern look
-- strong weather protection
-- clear and tinted options available
-- tempered glass is durable, safe, and low maintenance
-- clear glass generally blocks around 60–70% UV
-- tinted glass can block around 90–95% UV and reduces glare / heat
-
-Skyline Combo Covers:
-- strong structure
-- modern open-look design
-- good for homeowners wanting both protection and a cleaner architectural look
-
-Sunrooms:
-- brighter, more enclosed space
-- usable through more seasons
-- adds comfort, weather protection, and a more finished living space feel
-
-=========================
-CONTACT / BOOKING GUIDANCE
-=========================
-When the conversation is moving well, naturally guide the user toward:
-- booking a free on-site measurement
-- or leaving their phone / email for follow-up
-
-Do this especially when:
-- they want exact pricing
-- they do not know the size
-- they ask detailed project questions
-- they show clear buying intent
-
-Do not sound pushy.
-Sound practical and action-oriented.
-
-=========================
-RESPONSE STRUCTURE
-=========================
-Case 1: Product interest only
-- Short introduction
-- Key benefits
-- Invite city + approximate size
-- Optionally mention free on-site measurement
-
-Case 2: Quote with enough information
-- Sentence 1: rough price
-- Sentence 2: GST + site condition note
-- Sentence 3: next action (confirm quote, book visit, or leave contact)
-
-Case 3: User does not know size
-- Offer free on-site measurement immediately
-- Say exact pricing can be confirmed after the visit
-- Ask if they want to book
-
-Case 4: Strong intent / ready customer
-- Move naturally toward booking or contact collection
-
-=========================
-AGREEMENT / BOOKING TRIGGER
-=========================
-If the user shows agreement, readiness, or positive intent (examples: "yes", "yeah", "sure", "ok", "sounds good", "let's do it", "book it"):
-
-- DO NOT repeat earlier questions
-- DO NOT keep asking for all contact info at once
-- Move the conversation forward naturally
-- Collect information step by step, not as a rigid form
-
-BOOKING FLOW:
-Step 1:
-If city and size are NOT clear yet:
-- Ask only for:
-  • City
-  • Approximate size OR photo
-- Mention rough pricing range if helpful
-- Do NOT ask for name / phone / email / address yet
-
-Example:
-"Got it 👍 To give you a quick estimate, could you share:
-• Your city
-• Approx patio size (or a photo)
-
-Most projects are usually around $8–$15 per sq ft depending on material."
-
-Step 2:
-If city and size are already clear enough:
-- Ask only for:
-  • Name
-  • Phone number
-  • Email (for quote / follow-up)
-- Do NOT ask for address yet
-
-Example:
-"Perfect 👍 That helps.
-
-To move forward, I just need:
-• Your name
-• Phone number
-• Email (so we can send you the quote)"
-
-Step 3:
-Only after the user provides name + phone + email:
-- Ask for:
-  • Address (or nearest intersection / area)
-
-Example:
-"Great — what’s the address (or nearest intersection)?"
-
-IMPORTANT:
-- Never ask for name + phone + email + address all at once
-- Never repeat the same booking request more than once
-- Keep it short, friendly, and human
-- Sound like a real local estimator, not a form
-
-=========================
-EXAMPLES
-=========================
-User: "sunroom"
-Assistant:
-Sunrooms create a brighter, more enclosed space that can be enjoyed through more seasons of the year. A great option for extra comfort, weather protection, and a more finished extension of the home. Share your city and approximate size for a rough quote, or book a free on-site measurement.
-
-User: "glass patio cover"
-Assistant:
-Glass patio covers are a premium option with a clean, modern look and strong weather protection. Clear and tinted tempered glass options are available, and they are durable, safe, and low maintenance. Share your city and approximate size for a rough quote, or book a free on-site measurement.
-
-User: "500 sqft aluminum patio cover richmond"
-Assistant:
-Around $6,000–$7,500 for a 500 sqft aluminum patio cover. Plus 5% GST. Final price depends on site conditions. Book a free on-site measurement to confirm the exact quote.
-
-User: "I don't know the size"
-Assistant:
-No problem. Free on-site measurement is available, and exact pricing can be confirmed after the visit. Would you like to book a quick measurement appointment?
-
-User: "Richmond but no idea on size"
-Assistant:
-No problem. Free on-site measurement is available in Richmond, and exact pricing can be confirmed after the visit. Would you like to book a quick measurement appointment?
-
-User: "I want an exact quote"
-Assistant:
-Exact pricing can be confirmed with a free on-site measurement. Leave your city and preferred contact details, or book a measurement appointment to move forward.
+Keep it short, direct, and natural like a contractor.
 """
             },
             {
                 "role": "user",
                 "content": data.question
             }
-        ],
-        temperature=0.5
+        ]
     )
 
     answer = response.choices[0].message.content
 
-    # 写入 Google Sheet（记录聊天）
-    try:
-        safe_post_to_sheet({
-            "type": "chat",
-            "visitor_id": "chat_user",
-            "role": "chat",
-            "message": data.question,
-            "submitted_at": now_str()
-        })
-
-        safe_post_to_sheet({
-            "type": "chat",
-            "visitor_id": "ai",
-            "role": "assistant",
-            "message": answer,
-            "submitted_at": now_str()
-        })
-    except Exception:
-        pass
+    _log_chat_turn(
+        question=data.question,
+        answer=answer or "",
+        project_type=data.project_type,
+        city=data.city,
+        email=data.email,
+        phone=data.phone,
+    )
 
     return {
         "answer": answer
@@ -524,102 +189,271 @@ Exact pricing can be confirmed with a free on-site measurement. Leave your city 
 
 
 # =========================
-# 统一 lead 接口
-# 聊天窗口 和 booking form 都可以调用这个
+# /lead — JSON lead from chat mini form
 # =========================
+
+class LeadRequest(BaseModel):
+    source: str = "website_chat"
+    name: str
+    phone: str
+    email: Optional[str] = ""
+    city: str = ""
+    address: str = ""
+    project_type: str = ""
+    size: str = ""
+    preferred_contact_time: str = ""
+    message: str = ""
+    notes: str = ""
+
 
 @app.post("/lead")
-def submit_lead(data: LeadRequest):
-    payload = normalize_lead_payload(data)
+async def create_lead(lead: LeadRequest):
+    sg = SendGridAPIClient(os.getenv("SENDGRID_API_KEY"))
 
-    if not payload["name"] or not payload["phone"]:
-        return {
-            "success": False,
-            "message": "Name and phone are required."
-        }
+    safe = lambda v: html.escape((v or "").strip())
 
-    # 1) 写入 Google Sheet
-    sheet_result = safe_post_to_sheet({
-        "type": "lead",
-        "submitted_at": payload["submitted_at"],
-        "source": payload["source"],
-        "name": payload["name"],
-        "phone": payload["phone"],
-        "email": payload["email"],
-        "city": payload["city"],
-        "address": payload["address"],
-        "project_type": payload["project_type"],
-        "size": payload["size"],
-        "preferred_contact_time": payload["preferred_contact_time"],
-        "message": payload["message"],
-        "notes": payload["notes"]
-    })
+    # 1) Admin notification email
+    subject = f"New Lead - {safe(lead.name)}"
+    html_content = f"""
+    <h2>New Customer Lead</h2>
+    <p><b>Source:</b> {safe(lead.source)}</p>
+    <p><b>Name:</b> {safe(lead.name)}</p>
+    <p><b>Phone:</b> {safe(lead.phone)}</p>
+    <p><b>Email:</b> {safe(lead.email) or 'Not provided'}</p>
+    <p><b>City:</b> {safe(lead.city)}</p>
+    <p><b>Address:</b> {safe(lead.address) or 'Not provided'}</p>
+    <p><b>Project Type:</b> {safe(lead.project_type) or 'Not specified'}</p>
+    <p><b>Size:</b> {safe(lead.size) or 'Not provided'}</p>
+    <p><b>Preferred Contact:</b> {safe(lead.preferred_contact_time) or 'Any time'}</p>
+    <p><b>Message:</b> {safe(lead.message) or 'No message'}</p>
+    <p><b>Notes:</b> {safe(lead.notes) or ''}</p>
+    """
 
-    # 2) 发给你自己的提醒邮件
-    admin_email_result = send_admin_lead_email(payload)
+    admin_message = Mail(
+        from_email=os.getenv("SENDGRID_FROM_EMAIL"),
+        to_emails=os.getenv("LEAD_RECEIVER_EMAIL"),
+        subject=subject,
+        html_content=html_content,
+    )
 
-    # 3) 如果客户留了邮箱，自动发确认邮件
-    customer_email_result = send_customer_confirmation_email(payload)
+    try:
+        admin_response = sg.send(admin_message)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to send admin email: {str(e)}")
+
+    # 2) Customer confirmation email (only if email provided)
+    customer_code = None
+    email_val = (lead.email or "").strip()
+    if email_val:
+        customer_html = f"""
+        <h2>Thank you, {safe(lead.name)}!</h2>
+        <p>We've received your request for a free on-site measurement.</p>
+        <p>Project type: <b>{safe(lead.project_type) or 'To be discussed'}</b></p>
+        <p>City: <b>{safe(lead.city)}</b></p>
+        <p>Our team will contact you shortly to arrange the appointment.</p>
+        <p>Final pricing will be confirmed after the site visit.</p>
+        <br>
+        <p>Thank you,</p>
+        <p>LoomiHome Patios Team</p>
+        """
+        customer_message = Mail(
+            from_email=os.getenv("SENDGRID_FROM_EMAIL"),
+            to_emails=email_val,
+            subject="We received your measurement request",
+            html_content=customer_html,
+        )
+        try:
+            resp = sg.send(customer_message)
+            customer_code = resp.status_code
+        except Exception:
+            pass
+
+    # 3) Log to Google Sheet
+    try:
+        requests.post(SHEET_WEBHOOK, json={
+            "event": "lead",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "source": lead.source,
+            "name": lead.name,
+            "phone": lead.phone,
+            "email": email_val,
+            "city": lead.city,
+            "address": lead.address,
+            "project_type": lead.project_type,
+            "size": lead.size,
+            "message": lead.message,
+            "notes": lead.notes,
+            "visitor_id": email_val or lead.phone,
+            "role": "lead",
+        }, timeout=15)
+    except Exception:
+        pass
 
     return {
-        "success": True,
-        "message": "Lead received successfully.",
-        "sheet_result": sheet_result,
-        "admin_email_result": admin_email_result,
-        "customer_email_result": customer_email_result
+        "status": "success",
+        "admin_code": admin_response.status_code,
+        "customer_code": customer_code,
     }
 
 
 # =========================
-# 兼容旧接口 /send-email
-# 你的旧前端不改也能继续用
+# Lead email (appointment form)
 # =========================
+
+MAX_APPOINTMENT_PHOTOS = 8
+MAX_PHOTO_BYTES = 8 * 1024 * 1024  # 8 MB each (SendGrid total payload limits apply)
+
+
+def _safe_attachment_filename(original: Optional[str], index: int, mime: str) -> str:
+    base = (original or "").strip()
+    base = os.path.basename(base).replace("\\", "").replace("/", "")
+    if not base or len(base) > 120 or not re.match(r"^[\w.\- ()\[\]]+$", base):
+        ext = ".jpg"
+        if "png" in mime:
+            ext = ".png"
+        elif "gif" in mime:
+            ext = ".gif"
+        elif "webp" in mime:
+            ext = ".webp"
+        elif "heic" in mime:
+            ext = ".heic"
+        base = f"photo_{index + 1}{ext}"
+    return base
+
 
 @app.post("/send-email")
-def send_email(data: EmailRequest):
-    payload = {
-        "submitted_at": now_str(),
-        "source": (data.source or "").strip(),
-        "name": (data.name or "").strip(),
-        "phone": (data.phone or "").strip(),
-        "email": (data.email or "").strip(),
-        "city": (data.city or "").strip(),
-        "address": "",
-        "project_type": (data.project_type or "").strip(),
-        "size": (data.size or "").strip(),
-        "preferred_contact_time": "",
-        "message": (data.message or "").strip(),
-        "notes": ""
-    }
+async def send_email(
+    source: str = Form(...),
+    name: str = Form(...),
+    phone: str = Form(...),
+    email: str = Form(...),
+    city: str = Form(...),
+    project_type: str = Form(...),
+    size: str = Form(""),
+    message: str = Form(""),
+    photos: Union[UploadFile, List[UploadFile], None] = File(None),
+):
+    """
+    Appointment booking: multipart form (text fields + optional image files).
+    Photos are attached to the admin/lead notification email only.
+    """
+    sg = SendGridAPIClient(os.getenv("SENDGRID_API_KEY"))
 
-    if not payload["name"] or not payload["phone"]:
-        return {
-            "success": False,
-            "message": "Name and phone are required."
-        }
+    if photos is None:
+        photo_list: List[UploadFile] = []
+    elif isinstance(photos, list):
+        photo_list = photos
+    else:
+        photo_list = [photos]
+    if len(photo_list) > MAX_APPOINTMENT_PHOTOS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many photos (max {MAX_APPOINTMENT_PHOTOS}).",
+        )
 
-    sheet_result = safe_post_to_sheet({
-        "type": "lead",
-        "submitted_at": payload["submitted_at"],
-        "source": payload["source"],
-        "name": payload["name"],
-        "phone": payload["phone"],
-        "email": payload["email"],
-        "city": payload["city"],
-        "address": payload["address"],
-        "project_type": payload["project_type"],
-        "size": payload["size"],
-        "preferred_contact_time": payload["preferred_contact_time"],
-        "message": payload["message"],
-        "notes": payload["notes"]
-    })
+    attachment_count = 0
+    admin_attachments: List[Attachment] = []
 
-    admin_email_result = send_admin_lead_email(payload)
-    customer_email_result = send_customer_confirmation_email(payload)
+    for idx, upload in enumerate(photo_list):
+        raw = await upload.read()
+        if not raw:
+            continue
+        if len(raw) > MAX_PHOTO_BYTES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Photo too large (max {MAX_PHOTO_BYTES // (1024 * 1024)} MB each).",
+            )
+        mime = (upload.content_type or "").split(";")[0].strip().lower()
+        if not mime.startswith("image/"):
+            raise HTTPException(
+                status_code=400,
+                detail="Only image uploads are allowed.",
+            )
+        fname = _safe_attachment_filename(upload.filename, idx, mime)
+        encoded = base64.b64encode(raw).decode()
+        att = Attachment(
+            file_content=FileContent(encoded),
+            file_name=FileName(fname),
+            file_type=FileType(mime),
+            disposition=Disposition("attachment"),
+        )
+        admin_attachments.append(att)
+        attachment_count += 1
+
+    # 1) Admin / lead notification email
+    subject = f"New Lead - {name}"
+
+    html_content = f"""
+    <h2>New Customer Lead</h2>
+    <p><b>Source:</b> {html.escape(source)}</p>
+    <p><b>Name:</b> {html.escape(name)}</p>
+    <p><b>Phone:</b> {html.escape(phone)}</p>
+    <p><b>Email:</b> {html.escape(email)}</p>
+    <p><b>City:</b> {html.escape(city)}</p>
+    <p><b>Project Type:</b> {html.escape(project_type)}</p>
+    <p><b>Size:</b> {html.escape(size) if size else 'Not provided'}</p>
+    <p><b>Message:</b> {html.escape(message) if message else 'No message'}</p>
+    <p><b>Photos attached:</b> {attachment_count}</p>
+    """
+
+    admin_message = Mail(
+        from_email=os.getenv("SENDGRID_FROM_EMAIL"),
+        to_emails=os.getenv("LEAD_RECEIVER_EMAIL"),
+        subject=subject,
+        html_content=html_content,
+    )
+    for att in admin_attachments:
+        admin_message.add_attachment(att)
+
+    admin_response = sg.send(admin_message)
+
+    # 2) Customer confirmation email (no attachments — size & privacy)
+    customer_subject = "We received your appointment request"
+
+    customer_html = f"""
+    <h2>Thank you, {html.escape(name)}!</h2>
+    <p>We’ve received your request for a free on-site measurement.</p>
+    <p>Project type: <b>{html.escape(project_type)}</b></p>
+    <p>City: <b>{html.escape(city)}</b></p>
+    <p>Size: <b>{html.escape(size) if size else 'Not provided'}</b></p>
+    <p>Our team will contact you shortly to arrange the appointment.</p>
+    <p>Final pricing will be confirmed after the site visit.</p>
+    <br>
+    <p>Thank you,</p>
+    <p>AskPatio AI Team</p>
+    """
+
+    customer_message = Mail(
+        from_email=os.getenv("SENDGRID_FROM_EMAIL"),
+        to_emails=email,
+        subject=customer_subject,
+        html_content=customer_html,
+    )
+
+    customer_response = sg.send(customer_message)
+
+    # 3) Log lead to Google Sheet
+    try:
+        requests.post(SHEET_WEBHOOK, json={
+            "event": "lead",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "source": source,
+            "name": name,
+            "phone": phone,
+            "email": email,
+            "city": city,
+            "project_type": project_type,
+            "size": size,
+            "message": message,
+            "visitor_id": email or phone,
+            "role": "lead",
+        }, timeout=15)
+    except Exception:
+        pass
 
     return {
-        "success": True,
-        "sheet_result": sheet_result,
-        "admin_email_result": admin_email_result,
-        "customer_email_result": customer_email_result
+        "status": "success",
+        "admin_code": admin_response.status_code,
+        "customer_code": customer_response.status_code,
+        "photos_attached": attachment_count,
     }
