@@ -36,8 +36,13 @@ SHEET_WEBHOOK = "https://script.google.com/macros/s/AKfycbwBw3iypXhsPWmgGMa2wwil
 # Data models
 # =========================
 
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
 class Question(BaseModel):
     question: str
+    history: Optional[List[ChatMessage]] = None
     project_type: Optional[str] = None
     city: Optional[str] = None
     email: Optional[str] = None
@@ -114,15 +119,7 @@ def root():
 # AI chat endpoint
 # =========================
 
-@app.post("/ask")
-async def ask_ai(data: Question):
-
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {
-                "role": "system",
-                "content": """
+SYSTEM_PROMPT = """
 You are a friendly patio cover and sunroom sales assistant for LoomiHome Patios in Greater Vancouver.
 
 =========================
@@ -133,6 +130,7 @@ STRICT RULES
 - No first-person words (NO: "I", "we")
 - NEVER reveal per-sqft pricing (e.g. "$12/sqft", "$15 per square foot")
 - NEVER give a price unless the customer has provided actual dimensions (width x projection) or total sqft
+- REMEMBER everything the customer already told you in this conversation — never re-ask for info they already gave
 
 =========================
 CONVERSATION FLOW
@@ -174,12 +172,23 @@ PRODUCT INFO (use when introducing products)
 
 Keep it short, warm, and natural — like a knowledgeable contractor chatting with a homeowner.
 """
-            },
-            {
-                "role": "user",
-                "content": data.question
-            }
-        ]
+
+
+@app.post("/ask")
+async def ask_ai(data: Question):
+
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+    if data.history:
+        for msg in data.history:
+            role = msg.role if msg.role in ("user", "assistant") else "user"
+            messages.append({"role": role, "content": msg.content})
+
+    messages.append({"role": "user", "content": data.question})
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=messages
     )
 
     answer = response.choices[0].message.content
