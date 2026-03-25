@@ -185,9 +185,17 @@ PRODUCT INFO
 =========================
 LANGUAGE — MATCH THE CUSTOMER
 =========================
-- If the customer's message is primarily in Chinese (Simplified or Traditional), reply entirely in natural Simplified Chinese for Vancouver-area homeowners.
-- If the message is in English, follow the English rules above (including no "I" / "we").
-- Chinese replies may use natural business phrasing such as 我们 when it reads like a local consultant — do NOT translate English sentence-for-sentence; rewrite so it sounds spoken and trustworthy.
+- Decide reply language from the customer's **most recent message** (the one you are answering now).
+- If that message is **primarily English**, the **entire** reply must be **English only** — follow all English rules above (including no "I" / "we").
+- If that message is **primarily Chinese** (Simplified or Traditional), the **entire** reply must be **Simplified Chinese only** — use the Chinese section below.
+- If the user mixes both scripts heavily in one message, use whichever language dominates that message; still output **one language only** for the whole reply.
+
+=========================
+MONOLINGUAL OUTPUT — NO MIXING (CRITICAL)
+=========================
+- **Never** put Chinese characters or Chinese product names in an **English** reply. Forbidden in English replies: 玻璃顶棚, 铝合金顶棚, 玻璃＋铝合金组合顶棚, 露台顶棚, 阳光房, or any other Chinese wording. In English, use only: Glass Patio Cover, Aluminum Patio Cover, Skyline Combo Cover, Sunroom, patio cover (and normal English sentences).
+- **Never** put English product marketing names in a **Chinese** reply (e.g. do not say "Glass Patio Cover" or "Skyline Combo" in English inside Chinese text). In Chinese, use only the approved Chinese terms below. **Allowed exceptions in Chinese replies:** the email address info@loomihomepatios.ca (ASCII), the abbreviations **CAD** and **GST**, and numbers/units.
+- Do not alternate languages within one reply. One script, one voice.
 
 =========================
 CHINESE (简体中文) — TONE & VOCABULARY
@@ -219,6 +227,32 @@ Keep replies short (about 2–4 sentences worth in the chosen language), warm, a
 """
 
 
+def _monolingual_turn_reminder(user_text: str) -> Optional[str]:
+    """Nudge the model right before the latest user turn to cut EN/Chinese mixing."""
+    if not user_text or not user_text.strip():
+        return None
+    t = user_text.strip()
+    cjk = sum(1 for c in t if "\u4e00" <= c <= "\u9fff")
+    letters = sum(1 for c in t if c.isalpha() and ord(c) < 128)
+
+    if cjk >= 2 and cjk > letters:
+        return (
+            "Reminder for this reply: write the entire answer in Simplified Chinese only. "
+            "Do not use English product names or English sentences."
+        )
+    if letters >= 6 and letters > cjk * 2:
+        return (
+            "Reminder for this reply: write the entire answer in English only. "
+            "Do not use any Chinese characters."
+        )
+    if cjk >= 2 and letters >= 6:
+        return (
+            "Reminder for this reply: the user mixed scripts — pick one language for the "
+            "whole answer (the one they mainly used) with zero mixing."
+        )
+    return None
+
+
 @app.post("/ask")
 async def ask_ai(data: Question):
 
@@ -228,6 +262,10 @@ async def ask_ai(data: Question):
         for msg in data.history:
             role = msg.role if msg.role in ("user", "assistant") else "user"
             messages.append({"role": role, "content": msg.content})
+
+    turn_reminder = _monolingual_turn_reminder(data.question)
+    if turn_reminder:
+        messages.append({"role": "system", "content": turn_reminder})
 
     messages.append({"role": "user", "content": data.question})
 
