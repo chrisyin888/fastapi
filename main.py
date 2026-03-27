@@ -51,7 +51,7 @@ class Question(BaseModel):
 
 
 def _chat_log_file_path() -> str:
-    default = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "chat_history.jsonl")
+    default = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_history.jsonl")
     return os.getenv("CHAT_LOG_FILE", default)
 
 
@@ -64,63 +64,27 @@ def _log_chat_turn(
     phone: Optional[str],
     visitor_id: Optional[str] = None,
 ) -> None:
-    """Append one structured line to JSONL and post one row to Google Sheet webhook."""
+    """Append one JSON line per chat turn to chat_history.jsonl."""
     ts = datetime.now(timezone.utc).isoformat()
     vid = (visitor_id or "").strip()
     entry = {
         "timestamp": ts,
-        "user_message": question,
-        "ai_reply": answer or "",
+        "question": question,
+        "answer": answer or "",
+        "visitor_id": vid,
         "project_type": (project_type or "").strip(),
         "city": (city or "").strip(),
         "email": (email or "").strip(),
         "phone": (phone or "").strip(),
-        "visitor_id": vid,
     }
 
     try:
         path = _chat_log_file_path()
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        d = os.path.dirname(path)
+        if d:
+            os.makedirs(d, exist_ok=True)
         with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
-
-    # Single webhook payload: structured fields + legacy-friendly message/role + data.* for Apps Script
-    try:
-        summary = f"User: {question}\nAI: {answer or ''}"
-        vid_val = entry.get("visitor_id") or ""
-        payload = {
-            "event": "chat_turn",
-            "timestamp": ts,
-            "submitted_at": ts,
-            "visitor_id": vid_val,
-            "source": "loomihome_chat",
-            "event_type": "chat_turn",
-            "question": question,
-            "answer": answer or "",
-            "user_message": question,
-            "ai_reply": answer or "",
-            "project_type": entry["project_type"],
-            "city": entry["city"],
-            "email": entry["email"],
-            "phone": entry["phone"],
-            "role": "chat_turn",
-            "message": summary,
-            "data": {
-                "visitor_id": vid_val,
-                "submitted_at": ts,
-                "source": "loomihome_chat",
-                "event_type": "chat_turn",
-                "question": question,
-                "answer": answer or "",
-                "project_type": entry["project_type"],
-                "city": entry["city"],
-                "email": entry["email"],
-                "phone": entry["phone"],
-            },
-        }
-        requests.post(SHEET_WEBHOOK, json=payload, timeout=15)
     except Exception:
         pass
 
