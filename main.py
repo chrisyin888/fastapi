@@ -29,7 +29,7 @@ app.add_middleware(
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # Google Sheet Webhook
-SHEET_WEBHOOK = "https://script.google.com/macros/s/AKfycbwBw3iypXhsPWmgGMa2wwilgRDCYqJA3m5nq7RgbruW9s8ms6D6ZoL7R_isOKHUCrTH/exec"
+SHEET_WEBHOOK = "https://script.google.com/macros/s/AKfycbz6qjo4PQVEGRFI9V_DVlggGi0suzieFYGsrSjlptp-2rKlDytcPTcTYi_Qv7SjLc1y/exec"
 
 
 # =========================
@@ -47,6 +47,7 @@ class Question(BaseModel):
     city: Optional[str] = None
     email: Optional[str] = None
     phone: Optional[str] = None
+    visitor_id: Optional[str] = None
 
 
 def _chat_log_file_path() -> str:
@@ -61,9 +62,11 @@ def _log_chat_turn(
     city: Optional[str],
     email: Optional[str],
     phone: Optional[str],
+    visitor_id: Optional[str] = None,
 ) -> None:
     """Append one structured line to JSONL and post one row to Google Sheet webhook."""
     ts = datetime.now(timezone.utc).isoformat()
+    vid = (visitor_id or "").strip()
     entry = {
         "timestamp": ts,
         "user_message": question,
@@ -72,6 +75,7 @@ def _log_chat_turn(
         "city": (city or "").strip(),
         "email": (email or "").strip(),
         "phone": (phone or "").strip(),
+        "visitor_id": vid,
     }
 
     try:
@@ -82,26 +86,41 @@ def _log_chat_turn(
     except Exception:
         pass
 
-    # Single webhook payload: structured fields + legacy-friendly message/role
+    # Single webhook payload: structured fields + legacy-friendly message/role + data.* for Apps Script
     try:
         summary = f"User: {question}\nAI: {answer or ''}"
-        requests.post(
-            SHEET_WEBHOOK,
-            json={
-                "event": "chat_turn",
-                "timestamp": ts,
-                "user_message": question,
-                "ai_reply": answer or "",
+        vid_val = entry.get("visitor_id") or ""
+        payload = {
+            "event": "chat_turn",
+            "timestamp": ts,
+            "submitted_at": ts,
+            "visitor_id": vid_val,
+            "source": "loomihome_chat",
+            "event_type": "chat_turn",
+            "question": question,
+            "answer": answer or "",
+            "user_message": question,
+            "ai_reply": answer or "",
+            "project_type": entry["project_type"],
+            "city": entry["city"],
+            "email": entry["email"],
+            "phone": entry["phone"],
+            "role": "chat_turn",
+            "message": summary,
+            "data": {
+                "visitor_id": vid_val,
+                "submitted_at": ts,
+                "source": "loomihome_chat",
+                "event_type": "chat_turn",
+                "question": question,
+                "answer": answer or "",
                 "project_type": entry["project_type"],
                 "city": entry["city"],
                 "email": entry["email"],
                 "phone": entry["phone"],
-                "role": "chat_turn",
-                "visitor_id": "chat",
-                "message": summary,
             },
-            timeout=15,
-        )
+        }
+        requests.post(SHEET_WEBHOOK, json=payload, timeout=15)
     except Exception:
         pass
 
@@ -330,6 +349,7 @@ async def ask_ai(data: Question):
         city=data.city,
         email=data.email,
         phone=data.phone,
+        visitor_id=data.visitor_id,
     )
 
     return {
