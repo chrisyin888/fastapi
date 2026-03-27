@@ -29,7 +29,7 @@ app.add_middleware(
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # Google Sheet Webhook
-SHEET_WEBHOOK = "https://script.google.com/macros/s/AKfycbz6qjo4PQVEGRFI9V_DVlggGi0suzieFYGsrSjlptp-2rKlDytcPTcTYi_Qv7SjLc1y/exec"
+SHEET_WEBHOOK = "https://script.google.com/macros/s/AKfycbz6qjo4PQVEGRFl9V_DVlggGi0suzieFYGsrSjIptp-2rKIDytcPTcTYi_Qv7SjLc1y/exec"
 
 
 # =========================
