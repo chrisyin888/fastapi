@@ -163,6 +163,39 @@ def save_to_airtable(
         _log.exception("app: Airtable save_to_airtable failed")
 
 
+def save_to_google_sheet(
+    *,
+    visitor_id: Optional[str],
+    question: str,
+    ai_answer: Optional[str],
+    project_type: Optional[str],
+    city: Optional[str],
+    email: Optional[str],
+    phone: Optional[str],
+) -> None:
+    """POST chat turn to Google Apps Script webhook. Fails soft; never raises."""
+    webhook = (os.getenv("SHEET_WEBHOOK") or "").strip()
+    if not webhook:
+        _log.info("app: SHEET_WEBHOOK unset; skipping Google Sheet logging")
+        return
+    payload = {
+        "visitor_id": visitor_id or "",
+        "question": question or "",
+        "answer": ai_answer or "",
+        "project_type": project_type or "",
+        "city": city or "",
+        "email": email or "",
+        "phone": phone or "",
+    }
+    try:
+        _log.info("app: Google Sheet logging started")
+        resp = requests.post(webhook, json=payload, timeout=10)
+        resp.raise_for_status()
+        _log.info("app: Google Sheet row created")
+    except Exception:
+        _log.exception("app: Google Sheet logging failed")
+
+
 # =========================
 # Health / root
 # =========================
@@ -473,25 +506,15 @@ async def ask_ai(data: Question):
         meta=data.meta,
     )
 
-    try:
-        _log.info("app: /ask — Google Sheet logging started")
-        sheet_payload = {
-            "visitor_id": (data.visitor_id or "").strip(),
-            "question": data.question or "",
-            "answer": answer or "",
-            "project_type": (data.project_type or "").strip(),
-            "city": (data.city or "").strip(),
-            "email": (data.email or "").strip(),
-            "phone": (data.phone or "").strip(),
-        }
-        sheet_resp = requests.post(SHEET_WEBHOOK, json=sheet_payload, timeout=15)
-        sheet_resp.raise_for_status()
-        _log.info(
-            "app: /ask — Google Sheet logging success (status=%s)",
-            sheet_resp.status_code,
-        )
-    except Exception:
-        _log.exception("app: /ask — Google Sheet logging failed with traceback")
+    save_to_google_sheet(
+        visitor_id=data.visitor_id,
+        question=data.question,
+        ai_answer=answer,
+        project_type=data.project_type,
+        city=data.city,
+        email=data.email,
+        phone=data.phone,
+    )
 
     return {
         "answer": answer
