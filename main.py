@@ -74,6 +74,18 @@ class Question(BaseModel):
     meta: Optional[Dict[str, Any]] = None
 
 
+class ChatDisplayLog(BaseModel):
+    """Frontend-only bot lines (Quick Book, confirmations) — same Sheet shape as /ask."""
+
+    visitor_id: Optional[str] = None
+    question: str = ""
+    answer: str = ""
+    project_type: Optional[str] = None
+    city: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+
+
 def _chat_log_file_path() -> str:
     default = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_history.jsonl")
     return os.getenv("CHAT_LOG_FILE", default)
@@ -519,6 +531,21 @@ async def ask_ai(data: Question):
     return {
         "answer": answer
     }
+
+
+@app.post("/log-chat-display")
+async def log_chat_display(data: ChatDisplayLog):
+    """Log a bot/system line shown in the widget (no OpenAI). Same Google Sheet path as /ask."""
+    save_to_google_sheet(
+        visitor_id=data.visitor_id,
+        question=data.question or "",
+        ai_answer=data.answer or "",
+        project_type=data.project_type,
+        city=data.city,
+        email=data.email,
+        phone=data.phone,
+    )
+    return {"ok": True}
 
 
 # =========================
