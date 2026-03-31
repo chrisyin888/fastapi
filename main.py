@@ -118,7 +118,13 @@ def _log_chat_turn(
 
 @app.get("/")
 def root():
-    return {"status": "AskPatio AI running"}
+    """Cheap deploy check: if `backend_build` or `/db-test` missing, you are on old code."""
+    return {
+        "status": "AskPatio AI running",
+        "backend_build": "chat_logs_pg_v2",
+        "entry_file": "main.py",
+        "endpoints": ["/ask", "/db-test", "/debug-insert-chat"],
+    }
 
 
 @app.get("/db-test")

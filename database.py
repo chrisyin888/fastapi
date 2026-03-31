@@ -105,8 +105,10 @@ def init_db() -> None:
                 "database: ChatLog model not registered on Base.metadata (tables=%s)",
                 table_names,
             )
-        logger.info("database: running Base.metadata.create_all(checkfirst=True) for: %s", table_names)
+        logger.info("database: Base.metadata.create_all(checkfirst=True) STARTING now")
+        logger.info("database: tables to ensure: %s", table_names)
         Base.metadata.create_all(bind=engine, checkfirst=True)
+        logger.info("database: Base.metadata.create_all FINISHED")
 
         insp = inspect(engine)
         public_tables: List[str] = insp.get_table_names(schema="public")

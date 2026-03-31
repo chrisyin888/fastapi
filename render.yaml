@@ -1,9 +1,11 @@
+# Blueprint for deploying THIS repo (chrisyin888/fastapi) as a Web Service.
+# Entry: main.py → app  |  Start: uvicorn main:app
+# In Render Dashboard: connect repo root "." — do NOT use parent monorepo without rootDir + submodule init.
 services:
-  # A Docker web service
   - type: web
-    name: fastapi-example
+    name: askpatio-ai
     runtime: python
     plan: free
-    autoDeploy: false
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    autoDeploy: true
