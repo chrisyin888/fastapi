@@ -473,6 +473,26 @@ async def ask_ai(data: Question):
         meta=data.meta,
     )
 
+    try:
+        _log.info("app: /ask — Google Sheet logging started")
+        sheet_payload = {
+            "visitor_id": (data.visitor_id or "").strip(),
+            "question": data.question or "",
+            "answer": answer or "",
+            "project_type": (data.project_type or "").strip(),
+            "city": (data.city or "").strip(),
+            "email": (data.email or "").strip(),
+            "phone": (data.phone or "").strip(),
+        }
+        sheet_resp = requests.post(SHEET_WEBHOOK, json=sheet_payload, timeout=15)
+        sheet_resp.raise_for_status()
+        _log.info(
+            "app: /ask — Google Sheet logging success (status=%s)",
+            sheet_resp.status_code,
+        )
+    except Exception:
+        _log.exception("app: /ask — Google Sheet logging failed with traceback")
+
     return {
         "answer": answer
     }
