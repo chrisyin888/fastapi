@@ -11,6 +11,7 @@ from pydantic import BaseModel
 import re
 import requests
 from datetime import datetime, timezone
+from urllib.parse import quote
 from typing import Any, Dict, List, Optional, Union
 
 import database
@@ -110,6 +111,56 @@ def _log_chat_turn(
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception:
         pass
+
+
+def save_to_airtable(
+    *,
+    question: str,
+    ai_reply: str,
+    visitor_id: Optional[str] = None,
+    city: Optional[str] = None,
+    project_type: Optional[str] = None,
+    meta: Optional[Dict[str, Any]] = None,
+) -> None:
+    """POST one row to Airtable table 'Chat Logs'. Fails soft: logs only, never raises."""
+    api_key = (os.getenv("AIRTABLE_API_KEY") or "").strip()
+    base_id = (os.getenv("AIRTABLE_BASE_ID") or "").strip()
+    if not api_key or not base_id:
+        return
+
+    page_val = ""
+    if meta and isinstance(meta, dict):
+        p = meta.get("page")
+        if p is not None:
+            page_val = str(p).strip()
+        else:
+            page_val = str(meta.get("page_path") or "").strip()
+
+    ts = datetime.now(timezone.utc).isoformat()
+    fields = {
+        "Timestamp": ts,
+        "Visitor ID": (visitor_id or "").strip(),
+        "User Message": question or "",
+        "AI Reply": ai_reply or "",
+        "Page": page_val,
+        "City": (city or "").strip(),
+        "Project Type": (project_type or "").strip(),
+    }
+
+    table_path = quote("Chat Logs", safe="")
+    url = f"https://api.airtable.com/v0/{base_id}/{table_path}/records"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {"records": [{"fields": fields}]}
+
+    try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=30)
+        resp.raise_for_status()
+        _log.info("app: Airtable Chat Logs row created (status=%s)", resp.status_code)
+    except Exception:
+        _log.exception("app: Airtable save_to_airtable failed")
 
 
 # =========================
@@ -381,6 +432,15 @@ async def ask_ai(data: Question):
         _log.error(
             "app: /ask — PostgreSQL save failed (JSONL may still have written); check [database] logs"
         )
+
+    save_to_airtable(
+        question=data.question,
+        ai_reply=answer or "",
+        visitor_id=data.visitor_id,
+        city=data.city,
+        project_type=data.project_type,
+        meta=data.meta,
+    )
 
     return {
         "answer": answer
