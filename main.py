@@ -167,14 +167,45 @@ def save_to_airtable(
 # Health / root
 # =========================
 
+
+def _public_route_list() -> List[Dict[str, str]]:
+    """What is actually registered on this process (use to verify Render deployed this file)."""
+    out: List[Dict[str, str]] = []
+    for route in app.routes:
+        methods = getattr(route, "methods", None) or set()
+        path = getattr(route, "path", None)
+        if not path or path.startswith("/openapi") or path.startswith("/docs"):
+            continue
+        for m in sorted(methods):
+            if m in ("HEAD", "OPTIONS"):
+                continue
+            out.append({"method": m, "path": path})
+    out.sort(key=lambda x: (x["path"], x["method"]))
+    return out
+
+
 @app.get("/")
 def root():
-    """Cheap deploy check: if `backend_build` or `/db-test` missing, you are on old code."""
+    """If `routes` does not include POST /ask, this Render service is NOT running this repo/file."""
     return {
-        "status": "AskPatio AI running",
-        "backend_build": "chat_logs_pg_v2",
+        "service_name": "askpatio-ai-fastapi",
+        "backend_build": "askpatio_api_v3_route_introspect",
         "entry_file": "main.py",
-        "endpoints": ["/ask", "/db-test", "/debug-insert-chat"],
+        "entrypoint": "uvicorn main:app",
+        "expected_repo": "github.com/chrisyin888/fastapi",
+        "chat_endpoint": {"method": "POST", "path": "/ask"},
+        "routes": _public_route_list(),
+    }
+
+
+@app.get("/ask")
+def ask_get_hint():
+    """So GET /ask is not a silent 404 — chat must use POST with JSON body."""
+    return {
+        "detail": "Chat uses POST /ask with Content-Type: application/json",
+        "method": "POST",
+        "path": "/ask",
+        "example": {"question": "What sizes do you offer?", "visitor_id": "optional"},
     }
 
 
