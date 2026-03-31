@@ -5,3 +5,5 @@ sendgrid
 requests
 pydantic
 python-multipart
+sqlalchemy
+psycopg2-binary

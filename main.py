@@ -1,20 +1,40 @@
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from pydantic import BaseModel
-from fastapi.middleware.cors import CORSMiddleware
+import logging
+
 import base64
 import html
 import json
 import os
+
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 import re
 import requests
 from datetime import datetime, timezone
-from typing import List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
+import database
 from openai import OpenAI
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s [%(name)s] %(message)s",
+)
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Attachment, Disposition, FileContent, FileName, FileType, Mail
 
 app = FastAPI()
+
+_log = logging.getLogger(__name__)
+
+
+@app.on_event("startup")
+def startup_init_db() -> None:
+    _log.info("=== FastAPI startup: AskPatio / LoomiHome backend ===")
+    _log.info("app: startup — calling database.init_db()")
+    database.init_db()
+    _log.info("app: startup — database.init_db() finished (see [database] logs for table creation)")
+
 
 # CORS: allow all origins (open for testing)
 app.add_middleware(
@@ -48,6 +68,9 @@ class Question(BaseModel):
     email: Optional[str] = None
     phone: Optional[str] = None
     visitor_id: Optional[str] = None
+    source: Optional[str] = None
+    name: Optional[str] = None
+    meta: Optional[Dict[str, Any]] = None
 
 
 def _chat_log_file_path() -> str:
@@ -96,6 +119,21 @@ def _log_chat_turn(
 @app.get("/")
 def root():
     return {"status": "AskPatio AI running"}
+
+
+@app.get("/db-test")
+def db_test():
+    """Verify DATABASE_URL, connectivity, and whether public.chat_logs exists."""
+    return database.db_health_check()
+
+
+@app.post("/debug-insert-chat")
+def debug_insert_chat():
+    """
+    TEMPORARY — insert one test row into chat_logs for debugging.
+    Remove from production after Postgres logging is verified.
+    """
+    return database.debug_insert_test_row()
 
 
 # =========================
@@ -318,6 +356,25 @@ async def ask_ai(data: Question):
         phone=data.phone,
         visitor_id=data.visitor_id,
     )
+
+    saved = database.save_chat_log(
+        user_message=data.question,
+        ai_reply=answer or "",
+        visitor_id=data.visitor_id,
+        source=data.source,
+        project_type=data.project_type,
+        city=data.city,
+        name=data.name,
+        phone=data.phone,
+        email=data.email,
+        meta=data.meta,
+    )
+    if saved:
+        _log.info("app: /ask — chat row saved to PostgreSQL (save_chat_log ok)")
+    else:
+        _log.error(
+            "app: /ask — PostgreSQL save failed (JSONL may still have written); check [database] logs"
+        )
 
     return {
         "answer": answer
