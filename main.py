@@ -4,6 +4,9 @@ import base64
 import html
 import json
 import os
+import smtplib
+import ssl
+from email.message import EmailMessage
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -566,6 +569,78 @@ class LeadRequest(BaseModel):
     notes: str = ""
 
 
+def _format_smtp_send_error(exc: BaseException) -> str:
+    """Short SMTP error string for logs and warnings (no credentials)."""
+    return f"{type(exc).__name__}: {exc!s}"[:400]
+
+
+def _recipient_log_hint(addr: str) -> str:
+    """Privacy-safe hint for logs (not full address)."""
+    addr = (addr or "").strip()
+    if "@" not in addr:
+        return "(invalid_or_empty)"
+    local, _, domain = addr.partition("@")
+    domain = domain[:80]
+    if len(local) <= 1:
+        return f"***@{domain}"
+    return f"{local[0]}…@{domain}"
+
+
+def _send_html_email_workspace_smtp(
+    *,
+    host: str,
+    port: int,
+    username: str,
+    password: str,
+    mail_from: str,
+    mail_to: str,
+    subject: str,
+    html_body: str,
+) -> None:
+    """Send one HTML email via Google Workspace / Gmail SMTP (587 STARTTLS or 465 SSL)."""
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = mail_from
+    msg["To"] = mail_to
+    msg.set_content(
+        "This is an HTML message. Please use an email client that supports HTML.",
+        subtype="plain",
+    )
+    msg.add_alternative(html_body, subtype="html")
+
+    rcpt_hint = _recipient_log_hint(mail_to)
+    _log.info(
+        "lead: workspace_smtp start host=%s port=%s from=%s to=%s",
+        host,
+        port,
+        mail_from,
+        rcpt_hint,
+    )
+
+    context = ssl.create_default_context()
+    if port == 465:
+        with smtplib.SMTP_SSL(host, port, timeout=45, context=context) as server:
+            _log.info("lead: workspace_smtp connected (SSL) host=%s port=%s", host, port)
+            _log.info("lead: workspace_smtp login user=%s", username)
+            server.login(username, password)
+            _log.info("lead: workspace_smtp login_ok")
+            server.send_message(msg)
+            _log.info("lead: workspace_smtp send_message_ok to=%s", rcpt_hint)
+    else:
+        with smtplib.SMTP(host, port, timeout=45) as server:
+            _log.info("lead: workspace_smtp connected host=%s port=%s", host, port)
+            server.ehlo()
+            _log.info("lead: workspace_smtp ehlo_ok starttls")
+            server.starttls(context=context)
+            server.ehlo()
+            _log.info("lead: workspace_smtp starttls_ok")
+            _log.info("lead: workspace_smtp login user=%s", username)
+            server.login(username, password)
+            _log.info("lead: workspace_smtp login_ok")
+            server.send_message(msg)
+            _log.info("lead: workspace_smtp send_message_ok to=%s", rcpt_hint)
+
+
 def _format_sendgrid_send_error(exc: BaseException) -> str:
     """Human-readable + loggable summary (no secrets)."""
     parts = [type(exc).__name__, str(exc).strip() or "(empty message)"]
@@ -639,8 +714,11 @@ def _lead_summary_for_db(lead: LeadRequest, email_val: str) -> str:
 @app.post("/lead")
 async def create_lead(lead: LeadRequest):
     """
-    Accept a lead from the site/chat. Persists first (Sheet + optional Postgres);
-    SendGrid admin/customer mail is best-effort and must not drop the lead on 401/5xx.
+    Accept a lead from the site/chat. Persists first (Sheet + optional Postgres).
+
+    Admin notification: SendGrid (best-effort).
+    Customer confirmation: Google Workspace SMTP when WORKSPACE_SMTP_* is set;
+    otherwise SendGrid to customer if configured. Email failures never fail the request.
     """
     email_val = (lead.email or "").strip()
     warnings: List[str] = []
@@ -689,6 +767,8 @@ async def create_lead(lead: LeadRequest):
 
     admin_code: Optional[int] = None
     customer_code: Optional[int] = None
+    customer_email_sent = False
+    customer_email_channel: Optional[str] = None
 
     if not (api_key and from_email and to_admin):
         msg = (
@@ -738,10 +818,9 @@ async def create_lead(lead: LeadRequest):
                 _log.error("lead: admin email send failed: %s", detail, exc_info=True)
             warnings.append(f"email_admin_failed:{detail[:280]}")
 
-    # Customer confirmation (best-effort; only if we have SendGrid + visitor email)
-    if email_val and api_key and from_email:
-        sg2 = SendGridAPIClient(api_key)
-        customer_html = f"""
+    # Customer confirmation (best-effort) — prefer Google Workspace SMTP
+    customer_subject = "We received your measurement request"
+    customer_html = f"""
         <h2>Thank you, {safe(lead.name)}!</h2>
         <p>We've received your request for a free on-site measurement.</p>
         <p>Project type: <b>{safe(lead.project_type) or 'To be discussed'}</b></p>
@@ -752,18 +831,97 @@ async def create_lead(lead: LeadRequest):
         <p>Thank you,</p>
         <p>LoomiHome Patios Team</p>
         """
-        customer_message = Mail(
-            from_email=from_email,
-            to_emails=email_val,
-            subject="We received your measurement request",
-            html_content=customer_html,
-        )
+
+    if email_val:
+        ws_user = (os.getenv("WORKSPACE_SMTP_USER") or "").strip()
+        # App passwords are often pasted with spaces; strip all whitespace chars.
+        ws_pass = "".join((os.getenv("WORKSPACE_SMTP_PASSWORD") or "").split())
+        ws_host = (os.getenv("WORKSPACE_SMTP_HOST") or "smtp.gmail.com").strip()
+        ws_port_raw = (os.getenv("WORKSPACE_SMTP_PORT") or "587").strip()
         try:
-            resp = sg2.send(customer_message)
-            customer_code = resp.status_code
-        except Exception as e:
-            warnings.append(f"email_customer_failed:{_format_sendgrid_send_error(e)[:200]}")
-            _log.warning("lead: customer confirmation email failed: %s", _format_sendgrid_send_error(e))
+            ws_port = int(ws_port_raw)
+        except ValueError:
+            ws_port = 587
+        ws_from = (os.getenv("WORKSPACE_SMTP_FROM_EMAIL") or ws_user).strip()
+
+        _log.info(
+            "lead: customer_email_branch recipient=%s workspace_user_set=%s workspace_pass_set=%s "
+            "sendgrid_customer_fallback_available=%s",
+            _recipient_log_hint(email_val),
+            bool(ws_user),
+            bool(ws_pass),
+            bool(api_key and from_email),
+        )
+
+        if ws_user and ws_pass:
+            customer_email_channel = "workspace_smtp"
+            try:
+                _send_html_email_workspace_smtp(
+                    host=ws_host,
+                    port=ws_port,
+                    username=ws_user,
+                    password=ws_pass,
+                    mail_from=ws_from,
+                    mail_to=email_val,
+                    subject=customer_subject,
+                    html_body=customer_html,
+                )
+                customer_email_sent = True
+                _log.info(
+                    "lead: customer_email_sent channel=workspace_smtp host=%s port=%s from=%s",
+                    ws_host,
+                    ws_port,
+                    ws_from,
+                )
+            except Exception as e:
+                err = _format_smtp_send_error(e)
+                warnings.append(f"email_customer_failed:workspace_smtp:{err[:220]}")
+                _log.warning(
+                    "lead: customer_email_failed channel=workspace_smtp host=%s port=%s error=%s",
+                    ws_host,
+                    ws_port,
+                    err,
+                    exc_info=True,
+                )
+        elif api_key and from_email:
+            customer_email_channel = "sendgrid"
+            sg2 = SendGridAPIClient(api_key)
+            customer_message = Mail(
+                from_email=from_email,
+                to_emails=email_val,
+                subject=customer_subject,
+                html_content=customer_html,
+            )
+            try:
+                resp = sg2.send(customer_message)
+                customer_code = resp.status_code
+                customer_email_sent = True
+                _log.info(
+                    "lead: customer_email_sent channel=sendgrid status_code=%s",
+                    customer_code,
+                )
+            except Exception as e:
+                err = _format_sendgrid_send_error(e)
+                warnings.append(f"email_customer_failed:sendgrid:{err[:200]}")
+                _log.warning(
+                    "lead: customer_email_failed channel=sendgrid error=%s",
+                    err,
+                    exc_info=True,
+                )
+        else:
+            warnings.append(
+                "email_customer_skipped:set WORKSPACE_SMTP_USER and WORKSPACE_SMTP_PASSWORD "
+                "(or SendGrid for customer fallback)"
+            )
+            _log.warning(
+                "lead: customer_email_skipped (no WORKSPACE_SMTP_* and no SendGrid from key for customer)"
+            )
+
+    else:
+        _log.info(
+            "lead: customer_email_branch skipped — no recipient after trim "
+            "(JSON field `email` missing, null, or blank; customer auto-reply not attempted)"
+        )
 
     if not persisted:
         # Nothing stored — surface a clear failure for the frontend
@@ -777,12 +935,24 @@ async def create_lead(lead: LeadRequest):
         )
 
     # Keep status "success" for 200 when persisted so older clients stay compatible.
+    _log.info(
+        "lead: response_summary customer_email_sent=%s customer_email_channel=%s "
+        "warning_count=%s sheet_logged=%s database_logged=%s",
+        customer_email_sent,
+        customer_email_channel,
+        len(warnings),
+        sheet_ok,
+        db_ok,
+    )
+
     return {
         "status": "success",
         "sheet_logged": sheet_ok,
         "database_logged": db_ok,
         "admin_email_status": admin_code,
         "customer_email_status": customer_code,
+        "customer_email_sent": customer_email_sent,
+        "customer_email_channel": customer_email_channel,
         "warnings": warnings,
     }
 
