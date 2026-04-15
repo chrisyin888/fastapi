@@ -566,15 +566,141 @@ class LeadRequest(BaseModel):
     notes: str = ""
 
 
+def _format_sendgrid_send_error(exc: BaseException) -> str:
+    """Human-readable + loggable summary (no secrets)."""
+    parts = [type(exc).__name__, str(exc).strip() or "(empty message)"]
+    status = getattr(exc, "status_code", None)
+    if status is not None:
+        parts.append(f"http_status={status}")
+    body = getattr(exc, "body", None)
+    if isinstance(body, (bytes, bytearray)):
+        try:
+            body = body.decode("utf-8", errors="replace")[:400]
+        except Exception:
+            body = repr(body)[:200]
+    if body:
+        parts.append(f"body={body}")
+    return " | ".join(parts)
+
+
+def _lead_sheet_payload(lead: LeadRequest, email_val: str) -> Dict[str, Any]:
+    return {
+        "event": "lead",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "source": lead.source,
+        "name": lead.name,
+        "phone": lead.phone,
+        "email": email_val,
+        "city": lead.city,
+        "address": lead.address,
+        "project_type": lead.project_type,
+        "size": lead.size,
+        "message": lead.message,
+        "notes": lead.notes,
+        "visitor_id": email_val or lead.phone,
+        "role": "lead",
+    }
+
+
+def _post_lead_to_google_sheet(lead: LeadRequest, email_val: str) -> bool:
+    try:
+        r = requests.post(SHEET_WEBHOOK, json=_lead_sheet_payload(lead, email_val), timeout=15)
+        if r.status_code >= 400:
+            _log.error(
+                "lead: Google Sheet webhook returned %s — %s",
+                r.status_code,
+                (r.text or "")[:500],
+            )
+            return False
+        return True
+    except Exception:
+        _log.exception("lead: Google Sheet webhook request failed")
+        return False
+
+
+def _lead_summary_for_db(lead: LeadRequest, email_val: str) -> str:
+    """Stored in chat_logs.ai_reply so ops can read the lead without opening meta."""
+    lines = [
+        f"source={lead.source}",
+        f"name={lead.name}",
+        f"phone={lead.phone}",
+        f"email={email_val or '-'}",
+        f"city={(lead.city or '').strip() or '-'}",
+        f"address={(lead.address or '').strip() or '-'}",
+        f"project_type={(lead.project_type or '').strip() or '-'}",
+        f"size={(lead.size or '').strip() or '-'}",
+        f"preferred_contact={(lead.preferred_contact_time or '').strip() or '-'}",
+        f"message={(lead.message or '').strip() or '-'}",
+        f"notes={(lead.notes or '').strip() or '-'}",
+    ]
+    return "\n".join(lines)
+
+
 @app.post("/lead")
 async def create_lead(lead: LeadRequest):
-    sg = SendGridAPIClient(os.getenv("SENDGRID_API_KEY"))
+    """
+    Accept a lead from the site/chat. Persists first (Sheet + optional Postgres);
+    SendGrid admin/customer mail is best-effort and must not drop the lead on 401/5xx.
+    """
+    email_val = (lead.email or "").strip()
+    warnings: List[str] = []
+
+    # 1) Persist first — survives SendGrid outages / bad keys
+    sheet_ok = _post_lead_to_google_sheet(lead, email_val)
+    if not sheet_ok:
+        warnings.append("google_sheet_log_failed")
+
+    lead_meta: Dict[str, Any] = {
+        "event": "lead",
+        "source": lead.source,
+        "name": lead.name,
+        "phone": lead.phone,
+        "email": email_val,
+        "city": lead.city,
+        "address": lead.address,
+        "project_type": lead.project_type,
+        "size": lead.size,
+        "preferred_contact_time": lead.preferred_contact_time,
+        "message": lead.message,
+        "notes": lead.notes,
+    }
+    db_ok = database.save_chat_log(
+        user_message="[lead: quick_book]",
+        ai_reply=_lead_summary_for_db(lead, email_val),
+        visitor_id=email_val or (lead.phone or "").strip() or None,
+        source=lead.source,
+        project_type=(lead.project_type or "").strip() or None,
+        city=(lead.city or "").strip() or None,
+        name=(lead.name or "").strip() or None,
+        phone=(lead.phone or "").strip() or None,
+        email=email_val or None,
+        meta=lead_meta,
+    )
+    if not db_ok:
+        warnings.append("database_log_failed")
+
+    persisted = sheet_ok or db_ok
 
     safe = lambda v: html.escape((v or "").strip())
 
-    # 1) Admin notification email
-    subject = f"New Lead - {safe(lead.name)}"
-    html_content = f"""
+    api_key = (os.getenv("SENDGRID_API_KEY") or "").strip()
+    from_email = (os.getenv("SENDGRID_FROM_EMAIL") or "").strip()
+    to_admin = (os.getenv("LEAD_RECEIVER_EMAIL") or "").strip()
+
+    admin_code: Optional[int] = None
+    customer_code: Optional[int] = None
+
+    if not (api_key and from_email and to_admin):
+        msg = (
+            "email_admin_skipped: set SENDGRID_API_KEY, SENDGRID_FROM_EMAIL, "
+            "and LEAD_RECEIVER_EMAIL on the Render web service"
+        )
+        warnings.append(msg)
+        _log.warning("lead: %s", msg)
+    else:
+        sg = SendGridAPIClient(api_key)
+        subject = f"New Lead - {safe(lead.name)}"
+        html_content = f"""
     <h2>New Customer Lead</h2>
     <p><b>Source:</b> {safe(lead.source)}</p>
     <p><b>Name:</b> {safe(lead.name)}</p>
@@ -588,23 +714,33 @@ async def create_lead(lead: LeadRequest):
     <p><b>Message:</b> {safe(lead.message) or 'No message'}</p>
     <p><b>Notes:</b> {safe(lead.notes) or ''}</p>
     """
+        admin_message = Mail(
+            from_email=from_email,
+            to_emails=to_admin,
+            subject=subject,
+            html_content=html_content,
+        )
+        try:
+            admin_response = sg.send(admin_message)
+            admin_code = admin_response.status_code
+        except Exception as e:
+            detail = _format_sendgrid_send_error(e)
+            if "401" in detail or "Unauthorized" in detail:
+                _log.error(
+                    "lead: SendGrid returned 401 Unauthorized for admin email — "
+                    "verify SENDGRID_API_KEY (full access with Mail Send), sender "
+                    "SENDGRID_FROM_EMAIL is verified in SendGrid, and LEAD_RECEIVER_EMAIL is valid. "
+                    "Raw: %s",
+                    detail,
+                    exc_info=True,
+                )
+            else:
+                _log.error("lead: admin email send failed: %s", detail, exc_info=True)
+            warnings.append(f"email_admin_failed:{detail[:280]}")
 
-    admin_message = Mail(
-        from_email=os.getenv("SENDGRID_FROM_EMAIL"),
-        to_emails=os.getenv("LEAD_RECEIVER_EMAIL"),
-        subject=subject,
-        html_content=html_content,
-    )
-
-    try:
-        admin_response = sg.send(admin_message)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to send admin email: {str(e)}")
-
-    # 2) Customer confirmation email (only if email provided)
-    customer_code = None
-    email_val = (lead.email or "").strip()
-    if email_val:
+    # Customer confirmation (best-effort; only if we have SendGrid + visitor email)
+    if email_val and api_key and from_email:
+        sg2 = SendGridAPIClient(api_key)
         customer_html = f"""
         <h2>Thank you, {safe(lead.name)}!</h2>
         <p>We've received your request for a free on-site measurement.</p>
@@ -617,42 +753,37 @@ async def create_lead(lead: LeadRequest):
         <p>LoomiHome Patios Team</p>
         """
         customer_message = Mail(
-            from_email=os.getenv("SENDGRID_FROM_EMAIL"),
+            from_email=from_email,
             to_emails=email_val,
             subject="We received your measurement request",
             html_content=customer_html,
         )
         try:
-            resp = sg.send(customer_message)
+            resp = sg2.send(customer_message)
             customer_code = resp.status_code
-        except Exception:
-            pass
+        except Exception as e:
+            warnings.append(f"email_customer_failed:{_format_sendgrid_send_error(e)[:200]}")
+            _log.warning("lead: customer confirmation email failed: %s", _format_sendgrid_send_error(e))
 
-    # 3) Log to Google Sheet
-    try:
-        requests.post(SHEET_WEBHOOK, json={
-            "event": "lead",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "source": lead.source,
-            "name": lead.name,
-            "phone": lead.phone,
-            "email": email_val,
-            "city": lead.city,
-            "address": lead.address,
-            "project_type": lead.project_type,
-            "size": lead.size,
-            "message": lead.message,
-            "notes": lead.notes,
-            "visitor_id": email_val or lead.phone,
-            "role": "lead",
-        }, timeout=15)
-    except Exception:
-        pass
+    if not persisted:
+        # Nothing stored — surface a clear failure for the frontend
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "lead_not_persisted",
+                "message": "Lead could not be saved to Google Sheet or database; team was not notified via storage.",
+                "warnings": warnings,
+            },
+        )
 
+    # Keep status "success" for 200 when persisted so older clients stay compatible.
     return {
         "status": "success",
-        "admin_code": admin_response.status_code,
-        "customer_code": customer_code,
+        "sheet_logged": sheet_ok,
+        "database_logged": db_ok,
+        "admin_email_status": admin_code,
+        "customer_email_status": customer_code,
+        "warnings": warnings,
     }
 
 
