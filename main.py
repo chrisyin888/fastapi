@@ -765,22 +765,31 @@ async def create_lead(lead: LeadRequest):
     from_email = (os.getenv("SENDGRID_FROM_EMAIL") or "").strip()
     to_admin = (os.getenv("LEAD_RECEIVER_EMAIL") or "").strip()
 
-    admin_code: Optional[int] = None
+    admin_email_sent = False
     customer_code: Optional[int] = None
     customer_email_sent = False
     customer_email_channel: Optional[str] = None
 
-    if not (api_key and from_email and to_admin):
+    # Admin notification — Workspace SMTP (best-effort, never fails the request)
+    _ws_user_adm = (os.getenv("WORKSPACE_SMTP_USER") or "").strip()
+    _ws_pass_adm = "".join((os.getenv("WORKSPACE_SMTP_PASSWORD") or "").split())
+    _ws_host_adm = (os.getenv("WORKSPACE_SMTP_HOST") or "smtp.gmail.com").strip()
+    _ws_from_adm = (os.getenv("WORKSPACE_SMTP_FROM_EMAIL") or _ws_user_adm).strip()
+    try:
+        _ws_port_adm = int((os.getenv("WORKSPACE_SMTP_PORT") or "587").strip())
+    except ValueError:
+        _ws_port_adm = 587
+
+    if not (_ws_user_adm and _ws_pass_adm and to_admin):
         msg = (
-            "email_admin_skipped: set SENDGRID_API_KEY, SENDGRID_FROM_EMAIL, "
-            "and LEAD_RECEIVER_EMAIL on the Render web service"
+            "email_admin_skipped: set WORKSPACE_SMTP_USER, WORKSPACE_SMTP_PASSWORD, "
+            "and LEAD_RECEIVER_EMAIL"
         )
         warnings.append(msg)
         _log.warning("lead: %s", msg)
     else:
-        sg = SendGridAPIClient(api_key)
-        subject = f"New Lead - {safe(lead.name)}"
-        html_content = f"""
+        admin_subject = f"New Lead - {safe(lead.name)}"
+        admin_html = f"""
     <h2>New Customer Lead</h2>
     <p><b>Source:</b> {safe(lead.source)}</p>
     <p><b>Name:</b> {safe(lead.name)}</p>
@@ -794,29 +803,34 @@ async def create_lead(lead: LeadRequest):
     <p><b>Message:</b> {safe(lead.message) or 'No message'}</p>
     <p><b>Notes:</b> {safe(lead.notes) or ''}</p>
     """
-        admin_message = Mail(
-            from_email=from_email,
-            to_emails=to_admin,
-            subject=subject,
-            html_content=html_content,
-        )
         try:
-            admin_response = sg.send(admin_message)
-            admin_code = admin_response.status_code
+            _send_html_email_workspace_smtp(
+                host=_ws_host_adm,
+                port=_ws_port_adm,
+                username=_ws_user_adm,
+                password=_ws_pass_adm,
+                mail_from=_ws_from_adm,
+                mail_to=to_admin,
+                subject=admin_subject,
+                html_body=admin_html,
+            )
+            admin_email_sent = True
+            _log.info(
+                "lead: admin_email_sent channel=workspace_smtp host=%s port=%s to=%s",
+                _ws_host_adm,
+                _ws_port_adm,
+                _recipient_log_hint(to_admin),
+            )
         except Exception as e:
-            detail = _format_sendgrid_send_error(e)
-            if "401" in detail or "Unauthorized" in detail:
-                _log.error(
-                    "lead: SendGrid returned 401 Unauthorized for admin email — "
-                    "verify SENDGRID_API_KEY (full access with Mail Send), sender "
-                    "SENDGRID_FROM_EMAIL is verified in SendGrid, and LEAD_RECEIVER_EMAIL is valid. "
-                    "Raw: %s",
-                    detail,
-                    exc_info=True,
-                )
-            else:
-                _log.error("lead: admin email send failed: %s", detail, exc_info=True)
-            warnings.append(f"email_admin_failed:{detail[:280]}")
+            err = _format_smtp_send_error(e)
+            warnings.append(f"email_admin_failed:workspace_smtp:{err[:280]}")
+            _log.warning(
+                "lead: admin_email_failed channel=workspace_smtp host=%s port=%s error=%s",
+                _ws_host_adm,
+                _ws_port_adm,
+                err,
+                exc_info=True,
+            )
 
     # Customer confirmation (best-effort) — prefer Google Workspace SMTP
     customer_subject = "We received your measurement request"
@@ -936,8 +950,9 @@ async def create_lead(lead: LeadRequest):
 
     # Keep status "success" for 200 when persisted so older clients stay compatible.
     _log.info(
-        "lead: response_summary customer_email_sent=%s customer_email_channel=%s "
-        "warning_count=%s sheet_logged=%s database_logged=%s",
+        "lead: response_summary admin_email_sent=%s customer_email_sent=%s "
+        "customer_email_channel=%s warning_count=%s sheet_logged=%s database_logged=%s",
+        admin_email_sent,
         customer_email_sent,
         customer_email_channel,
         len(warnings),
@@ -949,7 +964,8 @@ async def create_lead(lead: LeadRequest):
         "status": "success",
         "sheet_logged": sheet_ok,
         "database_logged": db_ok,
-        "admin_email_status": admin_code,
+        "admin_email_sent": admin_email_sent,
+        "admin_email_channel": "workspace_smtp",
         "customer_email_status": customer_code,
         "customer_email_sent": customer_email_sent,
         "customer_email_channel": customer_email_channel,
