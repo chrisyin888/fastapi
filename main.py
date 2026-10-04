@@ -656,7 +656,7 @@ async def log_chat_display(data: ChatDisplayLog):
 class LeadRequest(BaseModel):
     source: str = "website_chat"
     name: str
-    phone: str
+    phone: str = ""
     email: Optional[str] = ""
     city: str = ""
     address: str = ""
@@ -931,12 +931,17 @@ async def create_lead(lead: LeadRequest):
             )
 
     # Customer confirmation (best-effort) — prefer Google Workspace SMTP
+    # For instant-quote leads, include the planning total so "Email Me This Quote" is real.
+    quote_line = ""
+    if (lead.source or "") == "instant_quote" and (lead.message or "").strip():
+        quote_line = f"<p>Your planning total: <b>{safe(lead.message)}</b></p>"
     customer_subject = "We received your measurement request"
     customer_html = f"""
         <h2>Thank you, {safe(lead.name)}!</h2>
         <p>We've received your request for a free on-site measurement.</p>
         <p>Project type: <b>{safe(lead.project_type) or 'To be discussed'}</b></p>
         <p>City: <b>{safe(lead.city)}</b></p>
+        {quote_line}
         <p>Our team will contact you shortly to arrange the appointment.</p>
         <p>Final pricing will be confirmed after the site visit.</p>
         <br>
