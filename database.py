@@ -51,8 +51,13 @@ def _raw_database_url() -> str:
 
 
 def _normalize_url(url: str) -> str:
+    # Be explicit: SQLAlchemy 2.x defaults postgresql:// to the psycopg (v3)
+    # driver, but this project installs psycopg2-binary. Pin the dialect so a
+    # fresh pip install can't break engine creation (2026-10-04 outage).
     if url.startswith("postgres://"):
-        return "postgresql://" + url[len("postgres://") :]
+        return "postgresql+psycopg2://" + url[len("postgres://") :]
+    if url.startswith("postgresql://"):
+        return "postgresql+psycopg2://" + url[len("postgresql://") :]
     return url
 
 
@@ -68,8 +73,10 @@ def get_engine():
             _engine = create_engine(url, pool_pre_ping=True)
             logger.info("database: SQLAlchemy engine created successfully")
         except Exception:
+            # Never raise: callers (e.g. save_chat_log) treat a None engine as
+            # "DB unavailable" and degrade gracefully instead of 500ing.
             logger.exception("database: failed to create SQLAlchemy engine")
-            raise
+            return None
     return _engine
 
 
